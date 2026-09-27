@@ -35,7 +35,7 @@ def write_csv(path: Path, jobs, fx, neg):
         w.writerow(["new", "score", "company", "title", "location", "salary", "salary_max_eur_year",
                     "est_low_eur", "est_typical_eur", "est_high_eur", "est_reach_with_negotiation_eur",
                     "est_basis", "est_confidence", "negotiate_to_meet_minimum",
-                    "years_required", "posted", "matched_keywords", "url"])
+                    "years_min", "years_max", "years_basis", "posted", "matched_keywords", "url"])
         for j in jobs:
             _, hi = j.salary.to_eur_year(fx) if j.salary else (None, None)
             e = j.estimate
@@ -44,7 +44,8 @@ def write_csv(path: Path, jobs, fx, neg):
                         f"{e.low:.0f}" if e else "", f"{e.typical:.0f}" if e else "",
                         f"{e.high:.0f}" if e and e.high else "", f"{j.reach:.0f}" if e and j.reach else "",
                         e.basis if e else "", e.confidence if e else "", "yes" if j.negotiate else "",
-                        j.years_required or "", f"{j.published:%Y-%m-%d}" if j.published else "",
+                        j.yoe.min if j.yoe else "", j.yoe.max if j.yoe and j.yoe.max is not None else "",
+                        j.yoe.basis if j.yoe else "", f"{j.published:%Y-%m-%d}" if j.published else "",
                         ", ".join(j.matched), j.url])
 
 
@@ -75,6 +76,31 @@ def _estimates_section(jobs, neg):
     return out
 
 
+def _experience_section(jobs):
+    rs = [j for j in jobs if j.yoe and j.yoe.basis != "job description"]
+    if not rs:
+        return []
+    out = ["## Experience research", "",
+           "For roles whose description doesn't state years of experience: what the company's "
+           "level for the role typically expects.", "",
+           "| Company | Role | Level | Years (typical) | Confidence | Sources |", "|---|---|---|---|---|---|"]
+    notes = []
+    for j in rs:
+        y = j.yoe
+        rng = f"{y.min}–{y.max}" if y.max is not None else f"{y.min}+"
+        if y.typical is not None:
+            rng += f" ({y.typical})"
+        srcs = " ".join(f"[{i + 1}]({s['url']})" for i, s in enumerate(y.sources))
+        out.append(f"| {j.company} | [{j.title.replace('|', '/')}]({j.url}) | {y.level} | {rng} | "
+                   f"{y.confidence} | {srcs} |")
+        if y.notes:
+            notes.append(f"- **{j.company}, {y.level or j.title}:** {y.notes}")
+    out.append("")
+    if notes:
+        out += list(dict.fromkeys(notes)) + [""]
+    return out
+
+
 def write_markdown(path: Path, jobs, cfg, crit, neg, contacts, failures, stats, hunter_enabled):
     now = datetime.now()
     out = [f"# Job scout report, {now:%Y-%m-%d %H:%M}", ""]
@@ -88,8 +114,8 @@ def write_markdown(path: Path, jobs, cfg, crit, neg, contacts, failures, stats, 
         crit_bits.append(f"salary €{crit.salary_min_eur:,.0f}–{crit.salary_max_eur or '∞'}")
     if crit.max_age_days:
         crit_bits.append(f"posted within {crit.max_age_days} days")
-    if crit.max_years_required:
-        crit_bits.append(f"≤ {crit.max_years_required} years required")
+    if crit.max_years_required or crit.min_years_expected:
+        crit_bits.append(f"experience fit {crit.min_years_expected or 0}–{crit.max_years_required or '∞'} years")
     out += ["Criteria: " + "; ".join(crit_bits), ""]
 
     if failures:
@@ -104,9 +130,14 @@ def write_markdown(path: Path, jobs, cfg, crit, neg, contacts, failures, stats, 
             loc += f" (+{j.variants - 1} more postings)"
         out.append(f"| {'🆕' if j.is_new else ''} | {j.score} | {j.company} | [{title}]({j.url}) | "
                    f"{loc.replace('|', '/')} | {_salary_cell(j, crit.fx_to_eur)} | "
-                   f"{j.years_required or ''} | {f'{j.published:%Y-%m-%d}' if j.published else ''} |")
+                   f"{j.yoe.display() if j.yoe else '?'} | {f'{j.published:%Y-%m-%d}' if j.published else ''} |")
+    out.append("")
+    out.append("Yrs: experience the posting asks for. ≈…* = not stated, researched for that level "
+               "(see Experience research); ? = not stated and not researched. 🤝 = meets your salary "
+               "minimum only with negotiation.")
     out.append("")
     out += _estimates_section(jobs, neg)
+    out += _experience_section(jobs)
 
     # ---- contacts, one block per company that has matches ----
     by_company = defaultdict(list)

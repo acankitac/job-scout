@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .models import Job
-from .textutil import years_required
+from .experience import YoeEstimate
+from .textutil import experience_required
 
 
 @dataclass
@@ -22,6 +23,7 @@ class Criteria:
     require_salary: bool = False
     max_age_days: int = 0
     max_years_required: int = 0
+    min_years_expected: int = 0
     min_score: int = 0
     keywords: dict = field(default_factory=dict)
     fx_to_eur: dict = field(default_factory=lambda: {"EUR": 1.0})
@@ -88,8 +90,8 @@ def score(job: Job, c: Criteria) -> tuple[int, list]:
 def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[str]:
     """Annotate the job in place. Returns None if it passes, else "category: detail".
 
-    Salary is judged separately (see salary.py), after de-duplication, because estimating
-    pay for roles that don't list it can cost a web lookup.
+    Experience and salary are judged separately (experience.py, salary.py), after
+    de-duplication, because filling in what a posting doesn't say can cost a web lookup.
     """
     now = now or datetime.now(timezone.utc)
     if c.title_include and not _any(c.title_include, job.title):
@@ -103,9 +105,10 @@ def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[
     job.location_reason = why
     if c.max_age_days and job.published and job.published < now - timedelta(days=c.max_age_days):
         return f"age: posted {job.published:%Y-%m-%d}, older than {c.max_age_days} days"
-    job.years_required = years_required(job.description)
-    if c.max_years_required and job.years_required and job.years_required > c.max_years_required:
-        return f"experience: asks for {job.years_required}+ years"
+    found = experience_required(job.description)
+    if found:
+        job.yoe = YoeEstimate(min=found[0], max=found[1])
+        job.years_required = found[0]
     job.score, job.matched = score(job, c)
     if job.score < c.min_score:
         return f"score: {job.score} below {c.min_score}"

@@ -10,7 +10,8 @@ from pathlib import Path
 from .contacts import Hunter
 from .filters import Criteria, _any, dedupe, evaluate
 from .report import write_csv, write_markdown
-from .research import SalaryResearch
+from .experience import judge_experience
+from .research import ExperienceResearch, SalaryResearch
 from .salary import (Negotiation, Profile, judge_estimate, judge_listed, listed_salary_usable,
                      sibling_estimate)
 from .sources import FETCHERS, SourceError
@@ -115,14 +116,44 @@ def main(argv=None):
     if args.new_only:
         matches = [j for j in matches if j.is_new]
 
-    # ---- salary: listed ranges, then estimates for unlisted roles ----
     profile = Profile.from_dict(cfg.get("profile", {}))
+    domains = {c["name"]: c.get("domain", "") for c in cfg["companies"]}
+
+    # ---- experience: from the JD, else researched for the role's level ----
+    xp = ExperienceResearch(cfg.get("research", {}), profile, ROOT / ".cache" / "experience")
+    xp_bounded = bool(crit.max_years_required or crit.min_years_expected)
+    if args.no_research or not xp_bounded or not cfg.get("research", {}).get("experience", True):
+        xp.key = None  # cached results are still used; no new paid lookups
+    kept = []
+    for j in matches:
+        if j.yoe is None:
+            j.yoe = xp.expected(j, domains.get(j.company, ""))
+        why = judge_experience(j, j.yoe, crit.max_years_required, crit.min_years_expected)
+        if why:
+            reasons["experience"] += 1
+            if args.explain:
+                print(f"  - {j.company}: {j.title} [{j.location}] -> {why}", file=sys.stderr)
+        else:
+            kept.append(j)
+    matches = kept
+    for e in xp.errors:
+        print(f"  ! {e}", file=sys.stderr)
+    if xp.lookups:
+        print(f"experience research: {xp.lookups} web lookups this run", file=sys.stderr)
+    if xp.skipped:
+        print(f"experience research: {xp.skipped} roles skipped, max_experience_lookups_per_run reached "
+              f"(rerun to continue; finished lookups are cached)", file=sys.stderr)
+    unknown = sum(1 for j in matches if j.yoe is None)
+    if xp_bounded and unknown:
+        hint = "" if xp.enabled or args.no_research else " (set ANTHROPIC_API_KEY to research them)"
+        print(f"{unknown} roles don't state years of experience; kept{hint}", file=sys.stderr)
+
+    # ---- salary: listed ranges, then estimates for unlisted roles ----
     neg = Negotiation.from_dict(cfg.get("negotiation", {}))
     bounded = bool(crit.salary_min_eur or crit.salary_max_eur)
     research = SalaryResearch(cfg.get("research", {}), profile, crit.fx_to_eur, ROOT / ".cache" / "salary")
     if args.no_research or not (bounded or args.research):
         research.key = None  # cached results are still used; no new paid lookups
-    domains = {c["name"]: c.get("domain", "") for c in cfg["companies"]}
     is_role = lambda title: not crit.title_include or _any(crit.title_include, title)
     kept = []
     for j in matches:

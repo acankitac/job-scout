@@ -1,11 +1,11 @@
-"""Salary research for roles that list no pay, using Claude with web search.
+"""Web research for what a posting doesn't say: pay, and the experience a role expects.
 
-Searches are restricted to an allowlist of salary-data sites plus the company's own domain,
-so estimates rest on sources you'd trust yourself. Results are cached per
-(company, level, country) and the number of paid lookups per run is capped.
+Uses Claude with web search, restricted to an allowlist of salary and career-data sites plus
+the company's own domain, so answers rest on sources you'd trust yourself. Results are cached
+and the number of paid lookups per run is capped.
 
-Needs ANTHROPIC_API_KEY. Without it, this module does nothing and those roles are kept,
-marked "no estimate".
+Needs ANTHROPIC_API_KEY. Without it nothing is looked up, and roles are kept rather than
+rejected on a guess.
 """
 import hashlib
 import json
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Job
+from .experience import YoeEstimate, title_stem
 from .salary import Estimate, Profile, infer_level
 
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -57,21 +58,51 @@ Reply with ONLY a JSON object, no prose, in exactly this shape:
   "sources": [{{"title": "...", "url": "..."}}]}}"""
 
 
+EXPERIENCE_PROMPT = """You are working out how much professional experience a job posting expects.
+The posting does not state a years-of-experience requirement.
+
+Company: {company}
+Posting title: {title}
+Posting location(s): {location}
+
+Posting excerpt:
+\"\"\"{excerpt}\"\"\"
+
+Do this:
+1. Work out which of {company}'s internal levels this posting corresponds to (e.g. "L4",
+   "Senior Engineer II"). Titles can mislead: some companies give every engineer the same
+   title (e.g. "Member of Technical Staff"), so use the responsibilities and scope in the excerpt.
+2. Search the allowed sources for the years of professional experience engineers at that level
+   at {company} typically have. levels.fyi reports years of experience per level; the company's
+   own career or leveling pages are also authoritative.
+3. If {company}-specific data is thin, use industry norms for that level, lower the confidence,
+   and say so in notes.
+
+Reply with ONLY a JSON object, no prose, in exactly this shape:
+{{"level": "company level name", "years_min": 0, "years_typical": 0, "years_max": 0,
+  "confidence": "low|medium|high",
+  "notes": "one or two sentences: what the range rests on and any caveats",
+  "sources": [{{"title": "...", "url": "..."}}]}}"""
+
+
 class ResearchError(Exception):
     pass
 
 
-class SalaryResearch:
-    def __init__(self, cfg: dict, profile: Profile, fx: dict, cache_dir: Path, api_key: str = None):
+class WebResearch:
+    """Shared plumbing: API key, cache, per-run cap, and the web-search conversation."""
+    label = "research"
+    cap_key = "max_lookups_per_run"
+
+    def __init__(self, cfg: dict, profile: Profile, cache_dir: Path, api_key: str = None):
         self.cfg = cfg
         self.profile = profile
-        self.fx = fx
         self.cache_dir = cache_dir
         self.key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.model = cfg.get("model", "claude-sonnet-5")
         self.tool = cfg.get("tool_version", "web_search_20250305")
         self.max_searches = cfg.get("max_searches_per_lookup", 5)
-        self.max_lookups = cfg.get("max_lookups_per_run", 20)
+        self.max_lookups = cfg.get(self.cap_key, 20)
         self.ttl = cfg.get("cache_days", 30) * 86400
         self.domains = cfg.get("trusted_domains") or DEFAULT_DOMAINS
         self.lookups = 0
@@ -82,16 +113,15 @@ class SalaryResearch:
     def enabled(self) -> bool:
         return bool(self.key) and self.cfg.get("enabled", True)
 
-    def _cache_path(self, company: str, level: str) -> Path:
-        k = f"{company}|{level}|{self.profile.country}".lower()
+    def _cache_path(self, *parts: str) -> Path:
+        k = "|".join(parts).lower()
         slug = re.sub(r"[^a-z0-9]+", "-", k)[:60]
         return self.cache_dir / f"{slug}-{hashlib.sha1(k.encode()).hexdigest()[:8]}.json"
 
-    def estimate(self, job: Job, domain: str = "") -> Optional[Estimate]:
-        level = infer_level(job.title)
-        path = self._cache_path(job.company, level)
+    def _lookup(self, path: Path, prompt: str, domain: str, what: str) -> Optional[dict]:
+        """Cached answer if fresh; otherwise a paid lookup, if enabled and under the cap."""
         if path.exists() and time.time() - path.stat().st_mtime < self.ttl:
-            return self._to_estimate(json.loads(path.read_text()), level)
+            return json.loads(path.read_text())
         if not self.enabled:
             return None
         if self.lookups >= self.max_lookups:
@@ -99,15 +129,13 @@ class SalaryResearch:
             return None
         self.lookups += 1
         try:
-            data = self._ask(job, level, domain)
+            data = self._ask(prompt, domain)
         except ResearchError as e:
-            self.errors.append(f"salary research {job.company} ({level}): {e}")
+            self.errors.append(f"{self.label} {what}: {e}")
             return None
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=1))
-        return self._to_estimate(data, level)
-
-    # ---- API ----
+        return data
 
     def _post(self, body: dict) -> dict:
         req = urllib.request.Request(API_URL, data=json.dumps(body).encode(), method="POST", headers={
@@ -121,12 +149,7 @@ class SalaryResearch:
         except (urllib.error.URLError, TimeoutError) as e:
             raise ResearchError(str(e)) from None
 
-    def _ask(self, job: Job, level: str, domain: str) -> dict:
-        p = self.profile
-        prompt = PROMPT.format(
-            company=job.company, title=job.title, location=job.location[:300], level=level,
-            years=p.years_experience, where=", ".join(filter(None, [p.city, p.country])),
-            country=p.country, currency=p.currency, excerpt=job.description[:1500])
+    def _ask(self, prompt: str, domain: str) -> dict:
         domains = list(dict.fromkeys(self.domains + ([domain] if domain else [])))
         messages = [{"role": "user", "content": prompt}]
         body = {"model": self.model, "max_tokens": 3000, "messages": messages,
@@ -147,12 +170,34 @@ class SalaryResearch:
             messages.append({"role": "assistant", "content": resp["content"]})
         data = parse_json_object(text)
         if data is None:
-            raise ResearchError("model did not return a JSON estimate")
+            raise ResearchError("model did not return a JSON answer")
         if not data.get("sources"):
             data["sources"] = found[:5]
         return data
 
-    # ---- validation ----
+    @staticmethod
+    def _sources(data: dict) -> list:
+        return [s for s in data.get("sources") or [] if isinstance(s, dict) and s.get("url")][:5]
+
+
+class SalaryResearch(WebResearch):
+    """Base-salary range and negotiation room, cached per (company, level, country)."""
+    label = "salary research"
+
+    def __init__(self, cfg: dict, profile: Profile, fx: dict, cache_dir: Path, api_key: str = None):
+        super().__init__(cfg, profile, cache_dir, api_key)
+        self.fx = fx
+
+    def estimate(self, job: Job, domain: str = "") -> Optional[Estimate]:
+        level = infer_level(job.title)
+        p = self.profile
+        prompt = PROMPT.format(
+            company=job.company, title=job.title, location=job.location[:300], level=level,
+            years=p.years_experience, where=", ".join(filter(None, [p.city, p.country])),
+            country=p.country, currency=p.currency, excerpt=job.description[:1500])
+        data = self._lookup(self._cache_path(job.company, level, p.country), prompt, domain,
+                            f"{job.company} ({level})")
+        return self._to_estimate(data, level) if data else None
 
     def _to_estimate(self, data: dict, level: str) -> Optional[Estimate]:
         rate = self.fx.get(str(data.get("currency", "")).upper())
@@ -173,8 +218,36 @@ class SalaryResearch:
             low=low or typ, typical=typ, high=high, level=str(data.get("level") or level),
             basis="web research", confidence=str(data.get("confidence", "low")).lower(),
             room=room if room in ("low", "medium", "high") else "unknown",
-            notes=str(data.get("notes", ""))[:400],
-            sources=[s for s in data.get("sources") or [] if isinstance(s, dict) and s.get("url")][:5])
+            notes=str(data.get("notes", ""))[:400], sources=self._sources(data))
+
+
+class ExperienceResearch(WebResearch):
+    """Typical years of experience for a role's level, cached per (company, title stem)."""
+    label = "experience research"
+    cap_key = "max_experience_lookups_per_run"
+
+    def expected(self, job: Job, domain: str = "") -> Optional[YoeEstimate]:
+        stem = title_stem(job.title)
+        prompt = EXPERIENCE_PROMPT.format(company=job.company, title=job.title,
+                                          location=job.location[:300], excerpt=job.description[:2500])
+        data = self._lookup(self._cache_path("yoe", job.company, stem), prompt, domain,
+                            f"{job.company} ({stem})")
+        return self._to_yoe(data) if data else None
+
+    def _to_yoe(self, data: dict) -> Optional[YoeEstimate]:
+        def num(k):
+            v = data.get(k)
+            return int(v) if isinstance(v, (int, float)) and 0 <= v <= 30 else None
+
+        lo, typ, hi = num("years_min"), num("years_typical"), num("years_max")
+        if lo is None and typ is None:
+            return None
+        lo = lo if lo is not None else typ
+        if hi is not None and hi < lo:
+            hi = None
+        return YoeEstimate(min=lo, max=hi, typical=typ, level=str(data.get("level") or ""),
+                           basis="web research", confidence=str(data.get("confidence", "low")).lower(),
+                           notes=str(data.get("notes", ""))[:400], sources=self._sources(data))
 
 
 def parse_json_object(text: str) -> Optional[dict]:

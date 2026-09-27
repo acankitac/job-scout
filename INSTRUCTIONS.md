@@ -46,7 +46,8 @@ locations = ["Berlin", "Germany"]          # a job passes if its location names 
 remote_regions = ["Europe", "EMEA", "Germany"]  # remote roles must name one of these regions
 salary_min_eur = 80000                      # annual, EUR; 0 = no minimum
 salary_max_eur = 0                          # 0 = no maximum
-max_years_required = 7                      # drop roles asking for more than this
+max_years_required = 7                      # drop roles expecting more years than this
+min_years_expected = 3                      # drop roles aimed below this (e.g. "0-2 years")
 ```
 
 **Titles.** `title_include` and `title_exclude` are regular expressions matched against the
@@ -57,13 +58,22 @@ and no exclude pattern. To target a different role type, change these first.
 description adds its weight to the score, doubled if it's in the title. Put your strongest
 skills at the top weights. `min_score` drops anything below the threshold.
 
+**Experience, not titles.** Seniority words in titles are unreliable: some companies call every
+engineer "Member of Technical Staff", and "Lead" is often a hands-on engineer. So `title_exclude`
+should list role *types* you don't want (manager, frontend, sales), not levels. Experience fit is
+judged from the job description instead: "5+ years", "3-5 years", "at least five years",
+"mindestens 5 Jahre" are all recognised. When the description doesn't say, which is common, the
+typical experience for that company's level for the role is researched online (see step 4 for
+the API key). Without research those roles are kept and shown as "?", never rejected on a guess.
+The report's "Yrs" column shows what was found: `5+` from the description, `≈5–8*` researched.
+
 **Salary.** Set `salary_min_eur` and/or `salary_max_eur` (annual base, EUR). See the next section
 for how roles that don't list pay are handled.
 
 **Tip:** after changing filters, run `./scout.py --explain` to see every rejected job and the
 reason, so you can tell whether a filter is too tight.
 
-## 4. Salary: listed, estimated and negotiated
+## 4. Salary and experience research
 
 Most European postings don't list pay. When you set a salary bound, job-scout doesn't drop
 those roles. It estimates them and judges every role by **what you could reach by negotiating**.
@@ -93,7 +103,7 @@ companies, 8% typical, 15% for companies that routinely negotiate up, 10% when u
 listed range, reachable pay is the top of the range. Roles that meet your minimum **only** with
 negotiation are marked 🤝 in the report. For those, open by asking for the top of the band.
 
-**Set up web research**
+**Set up web research** (used for both unlisted salaries and unstated experience)
 
 1. Create an API key at [console.anthropic.com](https://console.anthropic.com).
 2. Set it in your shell (add the line to `~/.zshrc` to make it permanent):
@@ -104,10 +114,12 @@ negotiation are marked 🤝 in the report. For those, open by asking for the top
 
 3. Fill in `[profile]` in `config.toml` (years of experience, city, country, currency).
 
-Each lookup costs roughly $0.05–0.20. Results are cached for 30 days per company + level +
-country, so one lookup covers every senior role at that company, and reruns are free. No run
-makes more than `max_lookups_per_run` (default 20) paid lookups; if the cap is hit, rerun to
-continue. Use `--no-research` to turn it off for a run, or `--research` to estimate even without a
+Each lookup costs roughly $0.05–0.20. Results are cached for 30 days: salary per company +
+level + country, experience per company + title ("Senior Software Engineer - Payments" and
+"Senior Software Engineer, Identity" share one lookup), so reruns are free. Each run makes at most
+`max_lookups_per_run` salary and `max_experience_lookups_per_run` experience lookups (default 20
+each); if a cap is hit, rerun to continue. Research only runs for roles that passed every other
+filter. Use `--no-research` to turn it off for a run, or `--research` to estimate even without a
 salary bound.
 
 The report's **Salary estimates** section lists every estimate with its range, typical figure,
@@ -184,7 +196,7 @@ Every option overrides `config.toml` for that run only.
 | `--max-age DAYS` | Only roles posted in the last N days |
 | `--top N` | Keep only the N highest-scoring roles |
 | `--no-contacts` | Skip Hunter.io lookups |
-| `--no-research` | No paid salary research this run (cached estimates still used) |
+| `--no-research` | No paid salary or experience research this run (cached results still used) |
 | `--research` | Research unlisted salaries even without a salary bound |
 | `--explain` | Print every rejected job and why |
 | `-c FILE` | Use a different config file |
@@ -227,6 +239,8 @@ Every option overrides `config.toml` for that run only.
 | Salary looks wrong | If it's marked "(parsed)" it was read from the description and may be a different region's pay band. Check the posting. |
 | `salary research ...: HTTP 401` | `ANTHROPIC_API_KEY` is wrong or not exported in this shell. |
 | "N roles skipped, max_lookups_per_run reached" | Rerun; finished lookups are cached, so it continues where it stopped. |
+| "N roles don't state years of experience; kept" | Set `ANTHROPIC_API_KEY` to research them, or check those roles by hand. |
+| A role was rejected for experience you think is wrong | `--explain` shows whether it came from the description or research. Delete its file in `.cache/experience/` to research again. |
 | An estimate looks off | Delete its file in `.cache/salary/` and rerun, or check the linked sources in the report. |
 
 ## 10. Running the tests

@@ -9,7 +9,7 @@ from unittest import mock
 from job_scout import contacts
 from job_scout.filters import Criteria, dedupe, evaluate
 from job_scout.models import Job, Salary
-from job_scout import research, salary as sal
+from job_scout import experience as xp, research, salary as sal
 from job_scout.textutil import emails_in, html_to_text, parse_salary, years_required
 
 
@@ -87,9 +87,10 @@ class Filtering(unittest.TestCase):
         self.assertIsNotNone(evaluate(job(location="Remote", remote=True), self.crit()))
         self.assertIsNone(evaluate(job(location="Remote", remote=True), self.crit(include_unscoped_remote=True)))
 
-    def test_years_cap(self):
-        j = job(description="Java. 10+ years of experience.")
-        self.assertTrue(evaluate(j, self.crit(max_years_required=7)).startswith("experience"))
+    def test_title_seniority_no_longer_filters(self):
+        j = job(title="Staff Backend Engineer", description="Java. 5+ years of experience.")
+        self.assertIsNone(evaluate(j, self.crit(title_exclude=[])))
+        self.assertEqual((j.yoe.min, j.yoe.max, j.yoe.basis), (5, None, "job description"))
 
     def test_age(self):
         old = job(published=datetime.now(timezone.utc) - timedelta(days=90))
@@ -106,6 +107,63 @@ class Filtering(unittest.TestCase):
     def test_unknown_config_key_rejected(self):
         with self.assertRaises(ValueError):
             Criteria.from_dict({"locatons": ["Berlin"]})
+
+
+class ExperienceFit(unittest.TestCase):
+    def test_jd_parsing_variants(self):
+        from job_scout.textutil import experience_required as er
+        cases = {
+            "3-5 years of backend experience": (3, 5),
+            "Have 10 or more years of engineering experience": (10, None),
+            "at least five years of professional experience": (5, None),
+            "mindestens 5 Jahre Berufserfahrung": (5, None),
+            "0–2 years experience in software": (0, 2),
+            "2+ years with Go. 6+ years of industry experience": (6, None),
+        }
+        for text, want in cases.items():
+            self.assertEqual(er(text), want, text)
+        self.assertIsNone(er("Founded 10 years ago in Berlin."))
+
+    def test_judge_bounds(self):
+        Y = xp.YoeEstimate
+        self.assertIsNone(xp.judge_experience(job(), Y(5, None), 7, 3))
+        self.assertTrue(xp.judge_experience(job(), Y(8, None), 7, 3).startswith("experience: expects 8+"))
+        self.assertTrue(xp.judge_experience(job(), Y(0, 2), 7, 3).startswith("experience: aimed at up to 2"))
+        self.assertIsNone(xp.judge_experience(job(), Y(2, None), 7, 3))  # "2+ years" doesn't cap
+        self.assertIsNone(xp.judge_experience(job(), None, 7, 3))        # unknown: kept
+
+    def test_title_stem(self):
+        self.assertEqual(xp.title_stem("Senior Software Engineer - Payments"), "senior software engineer")
+        self.assertEqual(xp.title_stem("Senior Software Engineer, Identity"), "senior software engineer")
+        self.assertEqual(xp.title_stem("(Senior) Backend Engineer (Java)"), "senior backend engineer")
+        self.assertEqual(xp.title_stem("Member of Technical Staff (Backend)"), "member of technical staff")
+
+    def test_research_fallback(self):
+        answer = {"level": "L3", "years_min": 0, "years_typical": 1, "years_max": 2, "confidence": "high",
+                  "notes": "Entry level.", "sources": [{"title": "levels", "url": "https://levels.fyi/z"}]}
+        reply = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(answer)}]}
+        body = io.BytesIO(json.dumps(reply).encode())
+        calls = []
+
+        def urlopen(req, timeout=None):
+            calls.append(json.loads(req.data))
+            return mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: False)
+        with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
+            r = research.ExperienceResearch({}, sal.Profile(), Path(d), api_key="k")
+            y = r.expected(job(title="Software Engineer (Early Careers)"), "acme.com")
+            again = r.expected(job(job_id="9", title="Software Engineer - Platform"), "acme.com")
+        self.assertEqual(len(calls), 1)  # same company + title stem: cached
+        self.assertEqual((y.min, y.max, y.basis, y.level), (0, 2, "web research", "L3"))
+        self.assertEqual(again.max, 2)
+        self.assertTrue(xp.judge_experience(job(), y, 7, 3).startswith("experience: aimed at up to 2"))
+        self.assertEqual(y.display(), "≈0–2*")
+
+    def test_separate_caps(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = research.ExperienceResearch({"max_lookups_per_run": 5, "max_experience_lookups_per_run": 0},
+                                            sal.Profile(), Path(d), api_key="k")
+            self.assertIsNone(r.expected(job()))
+            self.assertEqual(r.skipped, 1)
 
 
 class SalaryJudgement(unittest.TestCase):

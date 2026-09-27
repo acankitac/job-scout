@@ -76,27 +76,52 @@ def parse_salary(text: str) -> Optional[Salary]:
 
 # ---------- years of experience ----------
 
+_NUMWORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+             "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15,
+             "ein": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5, "sechs": 6, "sieben": 7, "acht": 8,
+             "zehn": 10}
+_N = r"(\d{1,2}|" + "|".join(_NUMWORDS) + r")"
 _YEARS = re.compile(
-    r"(?P<n>\d{1,2})\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*\d{1,2}\s*)?\+?\s*(?:years?|yrs?)\b",
+    rf"(?:at\s+least|minimum(?:\s+of)?|min\.?|mindestens|over|more\s+than)?\s*"
+    rf"\b{_N}\s*(?:\+|plus|\s+or\s+more)?\s*(?:(?:-|–|—|to|bis)\s*{_N}\s*)?\+?\s*"
+    rf"(?:years?|yrs?|jahren?)\b",
     re.I,
 )
+_EXP_WORDS = ("experience", "erfahrung", "berufserfahrung", "working as", "industry", "professional")
+
+
+def _num(tok: Optional[str]) -> Optional[int]:
+    if tok is None:
+        return None
+    return int(tok) if tok.isdigit() else _NUMWORDS.get(tok.lower())
+
+
+def experience_required(text: str) -> Optional[tuple[int, Optional[int]]]:
+    """The headline years-of-experience requirement as (min, max-or-None), or None.
+
+    Only counts figures tied to experience ("5+ years of experience", "3-5 years in backend
+    development", "mindestens 5 Jahre Berufserfahrung"). Takes the mention with the largest
+    minimum, because smaller figures are usually per-technology sub-requirements.
+    """
+    best = None
+    for m in _YEARS.finditer(text or ""):
+        window = text[m.end(): m.end() + 80].lower()
+        before = text[max(0, m.start() - 40): m.start()].lower()
+        if not any(w in window or w in before for w in _EXP_WORDS):
+            continue
+        lo, hi = _num(m.group(1)), _num(m.group(2))
+        if lo is None or not 0 <= lo <= 20:
+            continue
+        if hi is not None and not lo <= hi <= 25:
+            hi = None
+        if best is None or lo > best[0]:
+            best = (lo, hi)
+    return best
 
 
 def years_required(text: str) -> Optional[int]:
-    """Largest 'N+ years ... experience' figure in the text, or None.
-
-    Uses the largest figure because the headline requirement is usually the biggest one;
-    smaller numbers tend to be per-technology sub-requirements.
-    """
-    found = []
-    for m in _YEARS.finditer(text or ""):
-        window = text[m.end(): m.end() + 80].lower()
-        before = text[max(0, m.start() - 30): m.start()].lower()
-        if "experience" in window or "experience" in before:
-            n = int(m.group("n"))
-            if 1 <= n <= 20:
-                found.append(n)
-    return max(found) if found else None
+    found = experience_required(text)
+    return found[0] if found else None
 
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")

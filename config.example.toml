@@ -21,9 +21,12 @@ title_include = [
   "distributed systems", "infrastructure engineer", "systems engineer", "software developer",
   "data engineer", "developer",
 ]
+# Seniority words (senior, staff, principal, lead, junior) are deliberately NOT excluded here:
+# titles are unreliable signals of level, so experience fit is judged from the job description
+# instead (see max_years_required below). Exclude role types you don't want, not levels.
 title_exclude = [
-  "(?<!technical )staff", "principal", "director", "head of", "\\bvp\\b", "manager", "lead\\b",
-  "intern", "early career", "working student", "werkstudent", "junior", "graduate", "new grad",
+  "director", "head of", "\\bvp\\b", "manager",
+  "intern", "working student", "werkstudent",
   "front[- ]?end", "ios", "android", "mobile", "designer", "sales", "solutions",
   "support", "customer success", "account executive", "recruit", "scientist", "research", "security analyst",
   "qa\\b", "test automation", "sre\\b", "site reliability",
@@ -43,9 +46,14 @@ require_salary = false
 # marker (or --new-only) to see what appeared since your last run instead.
 max_age_days = 0
 
-# Drop postings whose headline requirement is more than this many years (0 = no limit).
-# Detected from text like "7+ years of experience"; the report shows what was found.
+# Experience fit, judged from the job description ("5+ years of experience", "3-5 years",
+# "mindestens 5 Jahre"). If the description doesn't say, the typical experience for the
+# company's level for that role is researched (needs ANTHROPIC_API_KEY, see [research]);
+# without research the role is kept and shown as "?".
+# Drop roles that expect more than this many years (0 = no limit):
 max_years_required = 7
+# Drop roles aimed at people with fewer than this many years, e.g. "0-2 years" (0 = no limit):
+min_years_expected = 3
 
 # Relevance scoring: weight per keyword found in the description; doubled if in the title.
 min_score = 4
@@ -110,13 +118,16 @@ low = 3        # fixed or formula-based pay
 medium = 8
 high = 15      # offers routinely negotiated up
 
-# Web research with Claude, restricted to trusted salary sources. Needs ANTHROPIC_API_KEY.
-# Each lookup costs roughly $0.05–0.20 in API usage; results are cached per
-# company + level + country, so only the first run for a company costs anything.
+# Web research with Claude, restricted to trusted salary and career-data sources, for what a
+# posting doesn't state: pay, and the experience a role expects. Needs ANTHROPIC_API_KEY.
+# Each lookup costs roughly $0.05–0.20 in API usage. Results are cached (salary per company +
+# level + country, experience per company + title), so only the first run costs anything.
 [research]
 enabled = true
 model = "claude-sonnet-5"
-max_lookups_per_run = 20       # hard cap on paid lookups per run
+max_lookups_per_run = 20             # hard cap on paid salary lookups per run
+experience = true                    # research experience when the JD doesn't state it
+max_experience_lookups_per_run = 20  # hard cap on paid experience lookups per run
 max_searches_per_lookup = 5
 cache_days = 30
 trusted_domains = [

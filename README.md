@@ -28,7 +28,10 @@ reports/jobs-2026-09-27.md
 - **Any company on Greenhouse, Ashby or Lever.** Most tech companies hire through one of
   these three; adding one takes four lines of config.
 - **Filters that match how job hunting actually works:** city, remote-within-region, salary
-  range (converted to EUR), title patterns, and a cap on required years of experience.
+  range (converted to EUR), and role type.
+- **Experience fit from the job description, not the title.** "Staff" and "Lead" mean different
+  things at different companies, so years of experience are read from the description; when it
+  doesn't say, the company's typical experience for that level is researched.
 - **Salary estimates for roles that don't list pay.** From the company's own published bands
   where possible, otherwise by web research on trusted salary sites. Every role is judged by
   what you could reach **with negotiation**, and 🤝 marks the ones that need it.
@@ -56,12 +59,12 @@ open reports/jobs-*.md
 ## How it works
 
 ```
-config.toml ──► fetch ──► filter ──► de-duplicate ──► salary ──────────────► rank ──► contacts ──► report
-                Greenhouse  location   one role,          listed range          keyword  Hunter.io   .md
-                Ashby       title      many postings      or estimate:          weights  LinkedIn    .csv
-                Lever       years                         company bands, then            links
-                                                          web research,
-                                                          + negotiation headroom
+config.toml ──► fetch ──► filter ──► de-duplicate ──► experience ──► salary ────────────► contacts ──► report
+                Greenhouse  location   one role,          from the JD,    listed range        Hunter.io   .md
+                Ashby       role type  many postings      else researched or estimate:        LinkedIn    .csv
+                Lever       keywords                      for the level   company bands,      links
+                                                                          web research,
+                                                                          + negotiation
 ```
 
 Most tech companies publish their open roles through an applicant tracking system, and the
@@ -76,7 +79,7 @@ appear in the report as pre-filled search links.
 
 - **LinkedIn is never scraped.** Its terms prohibit automated access, and it restricts accounts
   that do it. The report gives you LinkedIn search links to open yourself instead.
-- **Salary research only searches trusted salary sites** plus the company's own domain, and
+- **Web research only searches trusted salary and career-data sites** plus the company's own domain, and
   every estimate in the report links its sources.
 - **Recruiter data is personal data.** Hunter.io results are cached locally, git-ignored, and
   meant for your own applications only.
@@ -91,7 +94,8 @@ job_scout/
   sources.py          Greenhouse / Ashby / Lever fetchers
   filters.py          criteria, scoring, de-duplication
   salary.py           salary judgement, company-band estimates, negotiation headroom
-  research.py         salary web research (Claude + web search, trusted sites only)
+  experience.py       experience fit from the JD or researched level expectations
+  research.py         salary and experience web research (Claude + web search, trusted sites only)
   textutil.py         salary and experience parsing from description text
   contacts.py         Hunter.io lookup and LinkedIn links
   report.py           Markdown and CSV output
