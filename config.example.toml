@@ -22,15 +22,18 @@ title_include = [
   "data engineer", "developer",
 ]
 title_exclude = [
-  "staff", "principal", "director", "head of", "\\bvp\\b", "manager", "lead\\b",
+  "(?<!technical )staff", "principal", "director", "head of", "\\bvp\\b", "manager", "lead\\b",
   "intern", "early career", "working student", "werkstudent", "junior", "graduate", "new grad",
   "front[- ]?end", "ios", "android", "mobile", "designer", "sales", "solutions",
   "support", "customer success", "account executive", "recruit", "scientist", "research", "security analyst",
   "qa\\b", "test automation", "sre\\b", "site reliability",
 ]
 
-# Annual salary in EUR. 0 disables the bound. Jobs that don't list a salary are kept
-# unless require_salary = true (most European postings still don't list one).
+# Annual base salary in EUR. 0 disables that bound, so with only salary_min_eur set there is
+# no upper limit. salary_max_eur drops roles whose pay *floor* is above it (rarely useful).
+# Roles that don't list pay are estimated (see [profile], [negotiation], [research] below)
+# and judged by what's reachable with negotiation; with no estimate they are kept.
+# require_salary = true drops every role that doesn't list pay instead.
 salary_min_eur = 0
 salary_max_eur = 0
 require_salary = false
@@ -82,6 +85,45 @@ SEK = 0.091
 DKK = 0.134
 NOK = 0.086
 PLN = 0.235
+
+# ---------------------------------------------------------------------------------------
+# Salary estimation for roles that don't list pay. Used only when salary_min_eur or
+# salary_max_eur is set (or with --research).
+# ---------------------------------------------------------------------------------------
+
+# Who the estimate is for: pay depends on your level and the country you'd be employed in.
+[profile]
+years_experience = 5
+city = "Berlin"
+country = "Germany"
+currency = "EUR"
+# Location words that count as this country when reusing a company's other salaried postings.
+country_aliases = ["Deutschland", "Munich", "München", "Hamburg", "Frankfurt", "Cologne", "Köln", "Stuttgart", "Düsseldorf", "Leipzig"]
+
+# How far above a typical offer negotiation usually gets you on base salary, by how
+# negotiable the company is. Research reports each company's room; "default" is used
+# when it's unknown. A role passes your minimum if typical + headroom (capped at the top
+# of the band) reaches it.
+[negotiation]
+default_headroom_pct = 10
+low = 3        # fixed or formula-based pay
+medium = 8
+high = 15      # offers routinely negotiated up
+
+# Web research with Claude, restricted to trusted salary sources. Needs ANTHROPIC_API_KEY.
+# Each lookup costs roughly $0.05–0.20 in API usage; results are cached per
+# company + level + country, so only the first run for a company costs anything.
+[research]
+enabled = true
+model = "claude-sonnet-5"
+max_lookups_per_run = 20       # hard cap on paid lookups per run
+max_searches_per_lookup = 5
+cache_days = 30
+trusted_domains = [
+  "levels.fyi", "glassdoor.com", "glassdoor.de", "glassdoor.co.uk", "kununu.com",
+  "stepstone.de", "gehalt.de", "indeed.com", "payscale.com", "teamblind.com",
+  "arbeitsagentur.de",
+]   # the company's own domain is always added
 
 [hunter]
 per_company = 5     # recruiter contacts listed per company

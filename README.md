@@ -29,6 +29,9 @@ reports/jobs-2026-09-27.md
   these three; adding one takes four lines of config.
 - **Filters that match how job hunting actually works:** city, remote-within-region, salary
   range (converted to EUR), title patterns, and a cap on required years of experience.
+- **Salary estimates for roles that don't list pay.** From the company's own published bands
+  where possible, otherwise by web research on trusted salary sites. Every role is judged by
+  what you could reach **with negotiation**, and 🤝 marks the ones that need it.
 - **Ranking against your own skills.** Weighted keywords, doubled when they appear in the title.
 - **Only what's new.** Every run remembers what you've already seen; `--new-only` shows the rest.
 - **Recruiter contacts.** Emails and titles via [Hunter.io](https://hunter.io), ranked with
@@ -53,10 +56,12 @@ open reports/jobs-*.md
 ## How it works
 
 ```
-config.toml ──► fetch (parallel) ──► normalise ──► filter ──► de-duplicate ──► rank ──► contacts ──► report
-                 Greenhouse API                     location     one role,        keyword    Hunter.io   .md
-                 Ashby API                          salary       many postings    weights    LinkedIn    .csv
-                 Lever API                          title, years                             links
+config.toml ──► fetch ──► filter ──► de-duplicate ──► salary ──────────────► rank ──► contacts ──► report
+                Greenhouse  location   one role,          listed range          keyword  Hunter.io   .md
+                Ashby       title      many postings      or estimate:          weights  LinkedIn    .csv
+                Lever       years                         company bands, then            links
+                                                          web research,
+                                                          + negotiation headroom
 ```
 
 Most tech companies publish their open roles through an applicant tracking system, and the
@@ -71,6 +76,8 @@ appear in the report as pre-filled search links.
 
 - **LinkedIn is never scraped.** Its terms prohibit automated access, and it restricts accounts
   that do it. The report gives you LinkedIn search links to open yourself instead.
+- **Salary research only searches trusted salary sites** plus the company's own domain, and
+  every estimate in the report links its sources.
 - **Recruiter data is personal data.** Hunter.io results are cached locally, git-ignored, and
   meant for your own applications only.
 - **Polite by default.** One request per company per run, with retries and back-off.
@@ -83,6 +90,8 @@ config.example.toml   template; copy to config.toml (git-ignored)
 job_scout/
   sources.py          Greenhouse / Ashby / Lever fetchers
   filters.py          criteria, scoring, de-duplication
+  salary.py           salary judgement, company-band estimates, negotiation headroom
+  research.py         salary web research (Claude + web search, trusted sites only)
   textutil.py         salary and experience parsing from description text
   contacts.py         Hunter.io lookup and LinkedIn links
   report.py           Markdown and CSV output

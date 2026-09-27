@@ -9,6 +9,7 @@ from unittest import mock
 from job_scout import contacts
 from job_scout.filters import Criteria, dedupe, evaluate
 from job_scout.models import Job, Salary
+from job_scout import research, salary as sal
 from job_scout.textutil import emails_in, html_to_text, parse_salary, years_required
 
 
@@ -86,20 +87,6 @@ class Filtering(unittest.TestCase):
         self.assertIsNotNone(evaluate(job(location="Remote", remote=True), self.crit()))
         self.assertIsNone(evaluate(job(location="Remote", remote=True), self.crit(include_unscoped_remote=True)))
 
-    def test_salary_bounds(self):
-        low = job(salary=Salary(50000, 60000, "EUR"))
-        self.assertTrue(evaluate(low, self.crit(salary_min_eur=80000)).startswith("salary"))
-        ok = job(salary=Salary(70000, 95000, "EUR"))
-        self.assertIsNone(evaluate(ok, self.crit(salary_min_eur=80000)))
-
-    def test_parsed_usd_on_european_job_does_not_filter(self):
-        j = job(salary=Salary(60000, 70000, "USD", origin="parsed"))
-        self.assertIsNone(evaluate(j, self.crit(salary_min_eur=90000)))
-
-    def test_missing_salary(self):
-        self.assertIsNone(evaluate(job(), self.crit(salary_min_eur=80000)))
-        self.assertIsNotNone(evaluate(job(), self.crit(require_salary=True)))
-
     def test_years_cap(self):
         j = job(description="Java. 10+ years of experience.")
         self.assertTrue(evaluate(j, self.crit(max_years_required=7)).startswith("experience"))
@@ -119,6 +106,125 @@ class Filtering(unittest.TestCase):
     def test_unknown_config_key_rejected(self):
         with self.assertRaises(ValueError):
             Criteria.from_dict({"locatons": ["Berlin"]})
+
+
+class SalaryJudgement(unittest.TestCase):
+    FX = {"EUR": 1.0, "USD": 0.86}
+    NEG = sal.Negotiation()
+    PROFILE = sal.Profile(city="Berlin", country="Germany", country_aliases=["Munich"])
+
+    def test_listed_range_passes_if_top_reaches_minimum(self):
+        j = job(salary=Salary(90000, 160000, "EUR"))
+        self.assertIsNone(sal.judge_listed(j, 130000, 0, self.FX, self.NEG))
+        self.assertTrue(j.negotiate)  # midpoint 125k < 130k <= 160k
+
+    def test_listed_range_below_minimum(self):
+        j = job(salary=Salary(50000, 60000, "EUR"))
+        self.assertTrue(sal.judge_listed(j, 80000, 0, self.FX, self.NEG).startswith("salary"))
+
+    def test_min_only_means_no_upper_bound(self):
+        j = job(salary=Salary(200000, 250000, "EUR"))
+        self.assertIsNone(sal.judge_listed(j, 80000, 0, self.FX, self.NEG))
+        self.assertFalse(j.negotiate)
+
+    def test_max_drops_roles_whose_floor_is_above_it(self):
+        j = job(salary=Salary(200000, 250000, "EUR"))
+        self.assertIsNotNone(sal.judge_listed(j, 0, 150000, self.FX, self.NEG))
+
+    def test_estimate_passes_only_with_negotiation(self):
+        e = sal.Estimate(low=90000, typical=100000, high=120000, level="senior", basis="x", room="medium")
+        j = job()
+        self.assertIsNone(sal.judge_estimate(j, e, 105000, 0, self.NEG))   # reach 108k
+        self.assertTrue(j.negotiate)
+        self.assertAlmostEqual(j.reach, 108000)
+        self.assertIsNotNone(sal.judge_estimate(job(), e, 110000, 0, self.NEG))
+
+    def test_reach_capped_at_band_top(self):
+        self.assertEqual(sal.reachable(100000, 104000, 15), 104000)
+        self.assertAlmostEqual(sal.reachable(100000, None, 10), 110000)
+
+    def test_low_room_company_gets_less_headroom(self):
+        e = sal.Estimate(low=90000, typical=100000, high=130000, level="senior", basis="x", room="low")
+        self.assertIsNotNone(sal.judge_estimate(job(), e, 105000, 0, self.NEG))  # reach 103k
+
+    def test_infer_level(self):
+        self.assertEqual(sal.infer_level("Senior Backend Engineer"), "senior")
+        self.assertEqual(sal.infer_level("Member of Technical Staff (Backend)"), "mid")
+        self.assertEqual(sal.infer_level("Staff Engineer"), "staff")
+        self.assertEqual(sal.infer_level("(Senior) Software Engineer"), "senior")
+
+    def test_sibling_estimate_same_level_and_country(self):
+        target = job(job_id="t", title="Senior Backend Engineer, Payments")
+        same = job(job_id="a", title="Senior Software Engineer", location="Munich",
+                   salary=Salary(100000, 130000, "EUR"))
+        other_level = job(job_id="b", title="Backend Engineer", salary=Salary(60000, 80000, "EUR"))
+        other_country = job(job_id="c", title="Senior Backend Engineer", location="London",
+                            salary=Salary(90000, 120000, "GBP"))
+        other_company = job(job_id="d", company="Other", salary=Salary(1, 2, "EUR"))
+        e = sal.sibling_estimate(target, [target, same, other_level, other_country, other_company],
+                                 self.PROFILE, self.FX, lambda t: True)
+        self.assertEqual((e.low, e.high, e.typical), (100000, 130000, 115000))
+        self.assertEqual(e.basis, "company postings (n=1)")
+
+    def test_parsed_foreign_salary_on_local_posting_is_unusable(self):
+        j = job(salary=Salary(60000, 70000, "USD", origin="parsed"))
+        self.assertFalse(sal.listed_salary_usable(j, self.PROFILE))
+        self.assertTrue(sal.listed_salary_usable(job(salary=Salary(1, 2, "USD")), self.PROFILE))
+
+
+class WebResearch(unittest.TestCase):
+    ANSWER = {"currency": "EUR", "level": "L4", "base_low": 85000, "base_typical": 95000,
+              "base_high": 110000, "negotiation_room": "high", "confidence": "medium",
+              "notes": "Based on 12 levels.fyi entries.", "sources": [{"title": "levels", "url": "https://levels.fyi/x"}]}
+
+    def _fake(self, payloads):
+        calls = []
+
+        def urlopen(req, timeout=None):
+            calls.append(json.loads(req.data))
+            body = io.BytesIO(json.dumps(payloads[len(calls) - 1]).encode())
+            return mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: False)
+        return urlopen, calls
+
+    def test_lookup_parses_caches_and_restricts_domains(self):
+        reply = {"stop_reason": "end_turn", "content": [
+            {"type": "web_search_tool_result", "content": [{"url": "https://glassdoor.de/y", "title": "gd"}]},
+            {"type": "text", "text": "```json\n" + json.dumps(self.ANSWER) + "\n```"}]}
+        urlopen, calls = self._fake([reply])
+        with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
+            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            e = r.estimate(job(), "acme.com")
+            e2 = r.estimate(job(job_id="2"), "acme.com")  # same company + level: cache hit
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((e.low, e.typical, e.high, e.room, e.level), (85000, 95000, 110000, "high", "L4"))
+        self.assertEqual(e2.typical, 95000)
+        tool = calls[0]["tools"][0]
+        self.assertIn("acme.com", tool["allowed_domains"])
+        self.assertIn("levels.fyi", tool["allowed_domains"])
+
+    def test_pause_turn_is_resumed(self):
+        pause = {"stop_reason": "pause_turn", "content": [{"type": "text", "text": "searching"}]}
+        done = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(self.ANSWER)}]}
+        urlopen, calls = self._fake([pause, done])
+        with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
+            e = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k").estimate(job())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["messages"][-1]["role"], "assistant")
+        self.assertEqual(e.typical, 95000)
+
+    def test_lookup_cap_and_no_key(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {}, clear=True):
+            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d))
+            self.assertIsNone(r.estimate(job()))
+            capped = research.SalaryResearch({"max_lookups_per_run": 0}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            self.assertIsNone(capped.estimate(job()))
+            self.assertEqual(capped.skipped, 1)
+
+    def test_implausible_estimate_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            self.assertIsNone(r._to_estimate({"currency": "EUR", "base_typical": 95}, "senior"))
+            self.assertIsNone(r._to_estimate({"currency": "XYZ", "base_typical": 95000}, "senior"))
 
 
 class HunterLookup(unittest.TestCase):

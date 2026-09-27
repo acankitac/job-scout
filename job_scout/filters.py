@@ -72,25 +72,6 @@ def check_location(job: Job, c: Criteria) -> tuple[bool, str]:
     return False, f"location: '{loc or 'unknown'}'"
 
 
-def check_salary(job: Job, c: Criteria) -> tuple[bool, str]:
-    if not job.salary:
-        return (not c.require_salary), "no salary listed"
-    if job.salary.origin == "parsed" and job.salary.currency not in ("EUR", "GBP", "CHF"):
-        # Text-parsed USD figures on European postings are usually a US pay band elsewhere in
-        # the description. Display them, but don't filter on them.
-        return True, ""
-    lo, hi = job.salary.to_eur_year(c.fx_to_eur)
-    if lo is None and hi is None:
-        return (not c.require_salary), f"unknown currency {job.salary.currency}"
-    top = hi if hi is not None else lo
-    bottom = lo if lo is not None else hi
-    if c.salary_min_eur and top < c.salary_min_eur:
-        return False, f"salary: tops out at €{top:,.0f}"
-    if c.salary_max_eur and bottom > c.salary_max_eur:
-        return False, f"salary: starts at €{bottom:,.0f}"
-    return True, ""
-
-
 def score(job: Job, c: Criteria) -> tuple[int, list]:
     title, body = job.title.lower(), job.description.lower()
     total, matched = 0, []
@@ -105,7 +86,11 @@ def score(job: Job, c: Criteria) -> tuple[int, list]:
 
 
 def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[str]:
-    """Annotate the job in place. Returns None if it passes, else "category: detail"."""
+    """Annotate the job in place. Returns None if it passes, else "category: detail".
+
+    Salary is judged separately (see salary.py), after de-duplication, because estimating
+    pay for roles that don't list it can cost a web lookup.
+    """
     now = now or datetime.now(timezone.utc)
     if c.title_include and not _any(c.title_include, job.title):
         return "title: no include pattern matched"
@@ -118,9 +103,6 @@ def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[
     job.location_reason = why
     if c.max_age_days and job.published and job.published < now - timedelta(days=c.max_age_days):
         return f"age: posted {job.published:%Y-%m-%d}, older than {c.max_age_days} days"
-    ok, why = check_salary(job, c)
-    if not ok:
-        return why
     job.years_required = years_required(job.description)
     if c.max_years_required and job.years_required and job.years_required > c.max_years_required:
         return f"experience: asks for {job.years_required}+ years"

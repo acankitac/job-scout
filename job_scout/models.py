@@ -53,6 +53,9 @@ class Job:
     location_reason: str = ""
     is_new: bool = False
     variants: int = 1  # >1 when the same role was posted once per country
+    estimate: Optional[object] = None  # salary.Estimate, when no usable salary is listed
+    reach: Optional[float] = None      # EUR/yr reachable with negotiation, for estimates
+    negotiate: bool = False            # meets your minimum only if you negotiate
 
     @property
     def key(self) -> str:
