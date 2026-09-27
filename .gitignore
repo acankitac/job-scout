@@ -1,0 +1,10 @@
+# Your personal config (target companies); start from config.example.toml
+config.toml
+# Generated per run
+reports/
+# Seen-jobs state for the NEW marker
+.state/
+# Hunter.io results contain other people's contact details; never commit them
+.cache/
+__pycache__/
+*.pyc

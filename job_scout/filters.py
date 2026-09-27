@@ -1,0 +1,151 @@
+"""Criteria matching and relevance scoring."""
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from .models import Job
+from .textutil import years_required
+
+
+@dataclass
+class Criteria:
+    locations: list = field(default_factory=list)
+    exclude_locations: list = field(default_factory=list)
+    allow_remote: bool = True
+    remote_regions: list = field(default_factory=list)
+    include_unscoped_remote: bool = False
+    title_include: list = field(default_factory=list)
+    title_exclude: list = field(default_factory=list)
+    salary_min_eur: float = 0
+    salary_max_eur: float = 0
+    require_salary: bool = False
+    max_age_days: int = 0
+    max_years_required: int = 0
+    min_score: int = 0
+    keywords: dict = field(default_factory=dict)
+    fx_to_eur: dict = field(default_factory=lambda: {"EUR": 1.0})
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Criteria":
+        known = set(cls.__dataclass_fields__)
+        unknown = set(d) - known
+        if unknown:
+            raise ValueError(f"unknown criteria keys in config: {', '.join(sorted(unknown))}")
+        return cls(**d)
+
+
+def _any(patterns, text) -> Optional[str]:
+    for p in patterns:
+        if re.search(p, text, re.I):
+            return p
+    return None
+
+
+def _contains(needles, haystack) -> Optional[str]:
+    """Whole-word, case-insensitive match, so "EU" doesn't hit "Leuven"."""
+    for n in needles:
+        if re.search(r"(?<![a-z])" + re.escape(n.lower()) + r"(?![a-z])", haystack.lower()):
+            return n
+    return None
+
+
+def check_location(job: Job, c: Criteria) -> tuple[bool, str]:
+    loc = job.location or ""
+    bad = _contains(c.exclude_locations, loc)
+    if bad:
+        return False, f"location: excluded '{bad}'"
+    hit = _contains(c.locations, loc)
+    if hit:
+        return True, hit
+    if c.allow_remote:
+        # Region-level locations ("EMEA", "Europe") are hireable from anywhere in the region,
+        # whether or not the ATS flags them as remote.
+        region = _contains(c.remote_regions, loc)
+        if region:
+            return True, f"{'remote' if job.remote else 'region'} ({region})"
+        # "Remote" with no region attached is usually US-only at US companies.
+        if c.include_unscoped_remote and re.fullmatch(r"\s*remote\s*", loc, re.I):
+            return True, "remote (region unspecified)"
+    if not c.locations and not c.remote_regions:
+        return True, "any"
+    return False, f"location: '{loc or 'unknown'}'"
+
+
+def check_salary(job: Job, c: Criteria) -> tuple[bool, str]:
+    if not job.salary:
+        return (not c.require_salary), "no salary listed"
+    if job.salary.origin == "parsed" and job.salary.currency not in ("EUR", "GBP", "CHF"):
+        # Text-parsed USD figures on European postings are usually a US pay band elsewhere in
+        # the description. Display them, but don't filter on them.
+        return True, ""
+    lo, hi = job.salary.to_eur_year(c.fx_to_eur)
+    if lo is None and hi is None:
+        return (not c.require_salary), f"unknown currency {job.salary.currency}"
+    top = hi if hi is not None else lo
+    bottom = lo if lo is not None else hi
+    if c.salary_min_eur and top < c.salary_min_eur:
+        return False, f"salary: tops out at €{top:,.0f}"
+    if c.salary_max_eur and bottom > c.salary_max_eur:
+        return False, f"salary: starts at €{bottom:,.0f}"
+    return True, ""
+
+
+def score(job: Job, c: Criteria) -> tuple[int, list]:
+    title, body = job.title.lower(), job.description.lower()
+    total, matched = 0, []
+    for kw, weight in c.keywords.items():
+        pat = r"(?<![a-z0-9])" + re.escape(kw.lower()) + r"(?![a-z0-9])"
+        in_title = re.search(pat, title)
+        in_body = re.search(pat, body)
+        if in_title or in_body:
+            total += weight * (2 if in_title else 1)
+            matched.append(kw)
+    return total, matched
+
+
+def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[str]:
+    """Annotate the job in place. Returns None if it passes, else "category: detail"."""
+    now = now or datetime.now(timezone.utc)
+    if c.title_include and not _any(c.title_include, job.title):
+        return "title: no include pattern matched"
+    bad = _any(c.title_exclude, job.title)
+    if bad:
+        return f"title: matches exclude '{bad}'"
+    ok, why = check_location(job, c)
+    if not ok:
+        return why
+    job.location_reason = why
+    if c.max_age_days and job.published and job.published < now - timedelta(days=c.max_age_days):
+        return f"age: posted {job.published:%Y-%m-%d}, older than {c.max_age_days} days"
+    ok, why = check_salary(job, c)
+    if not ok:
+        return why
+    job.years_required = years_required(job.description)
+    if c.max_years_required and job.years_required and job.years_required > c.max_years_required:
+        return f"experience: asks for {job.years_required}+ years"
+    job.score, job.matched = score(job, c)
+    if job.score < c.min_score:
+        return f"score: {job.score} below {c.min_score}"
+    return None
+
+
+def dedupe(jobs: list) -> list:
+    """Collapse one role posted several times (per country, or as parallel requisitions).
+
+    Same company and same title stem ("Backend Engineer / Spain / Remote" -> "backend engineer")
+    means same role. The copy whose location matched most directly is kept.
+    """
+    groups = {}
+    for j in jobs:
+        stem = re.split(r"\s+[/|]\s+", j.title)[0].strip().lower()
+        k = (j.company, re.sub(r"\s+", " ", stem))
+        groups.setdefault(k, []).append(j)
+    out = []
+    for group in groups.values():
+        group.sort(key=lambda j: (not j.location_reason or j.location_reason.startswith(("remote", "region")), -j.score))
+        keep = group[0]
+        if len(group) > 1:
+            keep.variants = len(group)
+        out.append(keep)
+    return out

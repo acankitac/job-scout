@@ -1,0 +1,126 @@
+# job-scout configuration template. Copy to config.toml (git-ignored) and edit:
+#   cp config.example.toml config.toml
+#
+# job-scout configuration. Every field in [criteria] can also be overridden on the command line
+# for a single run: see ./scout.py --help
+
+[criteria]
+# A job passes if its location contains any of these (case-insensitive substring match).
+locations = ["Berlin", "Germany", "Deutschland"]
+exclude_locations = []
+
+# Remote jobs pass only if their location also names one of these regions.
+allow_remote = true
+remote_regions = ["Europe", "EMEA", "EU", "Germany", "CET", "Worldwide", "Anywhere"]
+# A bare "Remote" with no region is usually US-only at US companies, so it's off by default.
+include_unscoped_remote = false
+
+# Regexes, case-insensitive, matched against the job title.
+title_include = [
+  "software engineer", "backend", "back-end", "back end", "platform engineer",
+  "distributed systems", "infrastructure engineer", "systems engineer", "software developer",
+  "data engineer", "developer",
+]
+title_exclude = [
+  "staff", "principal", "director", "head of", "\\bvp\\b", "manager", "lead\\b",
+  "intern", "early career", "working student", "werkstudent", "junior", "graduate", "new grad",
+  "front[- ]?end", "ios", "android", "mobile", "designer", "sales", "solutions",
+  "support", "customer success", "account executive", "recruit", "scientist", "research", "security analyst",
+  "qa\\b", "test automation", "sre\\b", "site reliability",
+]
+
+# Annual salary in EUR. 0 disables the bound. Jobs that don't list a salary are kept
+# unless require_salary = true (most European postings still don't list one).
+salary_min_eur = 0
+salary_max_eur = 0
+require_salary = false
+
+# Drop postings older than this many days (0 = no limit). Everything on these boards is still
+# open, and many good roles stay listed for months, so this is off by default. Use the 🆕
+# marker (or --new-only) to see what appeared since your last run instead.
+max_age_days = 0
+
+# Drop postings whose headline requirement is more than this many years (0 = no limit).
+# Detected from text like "7+ years of experience"; the report shows what was found.
+max_years_required = 7
+
+# Relevance scoring: weight per keyword found in the description; doubled if in the title.
+min_score = 4
+[criteria.keywords]
+"backend" = 4
+"back-end" = 4
+"distributed systems" = 4
+"distributed" = 2
+"java" = 3
+"kotlin" = 3
+"go" = 1
+"golang" = 3
+"python" = 2
+"microservices" = 2
+"api" = 1
+"grpc" = 2
+"graphql" = 1
+"kafka" = 3
+"spark" = 2
+"aws" = 2
+"postgresql" = 2
+"postgres" = 2
+"dynamodb" = 1
+"kubernetes" = 1
+"event-driven" = 2
+"scalab" = 1
+"data pipeline" = 1
+"senior" = 1
+
+# Rough conversion rates to EUR, used for the salary filter. Update occasionally.
+[criteria.fx_to_eur]
+EUR = 1.0
+USD = 0.86
+GBP = 1.16
+CHF = 1.07
+SEK = 0.091
+DKK = 0.134
+NOK = 0.086
+PLN = 0.235
+
+[hunter]
+per_company = 5     # recruiter contacts listed per company
+cache_days = 30     # Hunter results are cached per domain for this long
+
+# Pre-filled search used for the "check by hand" links (LinkedIn Jobs, career sites).
+[search]
+query = "backend engineer"
+location = "Berlin"
+
+# ---------------------------------------------------------------------------------------
+# Companies with a public ATS job board. `ats` is greenhouse, ashby or lever; `token` is the
+# board slug from their careers URL (e.g. job-boards.greenhouse.io/<token>). `domain` is used
+# for the recruiter email lookup. See INSTRUCTIONS.md, step 5, for how to find these.
+# ---------------------------------------------------------------------------------------
+
+[[companies]]
+name = "ExampleCorp"
+ats = "greenhouse"        # job URL: job-boards.greenhouse.io/examplecorp/jobs/...
+token = "examplecorp"
+domain = "examplecorp.com"
+
+[[companies]]
+name = "SampleLabs"
+ats = "ashby"             # job URL: jobs.ashbyhq.com/samplelabs/...
+token = "samplelabs"
+domain = "samplelabs.io"
+
+[[companies]]
+name = "DemoSoft"
+ats = "lever"             # job URL: jobs.lever.co/demosoft/...
+token = "demosoft"
+domain = "demosoft.com"
+
+# ---------------------------------------------------------------------------------------
+# Career sites with no public API. Listed in the report as pre-filled search links.
+# {query} and {location} come from [search].
+# ---------------------------------------------------------------------------------------
+
+[[manual]]
+name = "BigTechCo"
+url = "https://careers.bigtechco.com/search?q={query}&location={location}"
