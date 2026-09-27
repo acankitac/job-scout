@@ -9,8 +9,11 @@ from unittest import mock
 from job_scout import contacts
 from job_scout.filters import Criteria, dedupe, evaluate
 from job_scout.models import Job, Salary
-from job_scout import experience as xp, research, salary as sal
+from job_scout import experience as xp, llm, research, salary as sal
 from job_scout.textutil import emails_in, html_to_text, parse_salary, years_required
+
+
+ANTH = {"providers": ["anthropic"]}  # keep tests off AWS
 
 
 def job(**kw):
@@ -149,7 +152,7 @@ class ExperienceFit(unittest.TestCase):
             calls.append(json.loads(req.data))
             return mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: False)
         with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
-            r = research.ExperienceResearch({}, sal.Profile(), Path(d), api_key="k")
+            r = research.ExperienceResearch(ANTH, sal.Profile(), Path(d), api_key="k")
             y = r.expected(job(title="Software Engineer (Early Careers)"), "acme.com")
             again = r.expected(job(job_id="9", title="Software Engineer - Platform"), "acme.com")
         self.assertEqual(len(calls), 1)  # same company + title stem: cached
@@ -160,7 +163,7 @@ class ExperienceFit(unittest.TestCase):
 
     def test_separate_caps(self):
         with tempfile.TemporaryDirectory() as d:
-            r = research.ExperienceResearch({"max_lookups_per_run": 5, "max_experience_lookups_per_run": 0},
+            r = research.ExperienceResearch(dict(ANTH, max_lookups_per_run=5, max_experience_lookups_per_run=0),
                                             sal.Profile(), Path(d), api_key="k")
             self.assertIsNone(r.expected(job()))
             self.assertEqual(r.skipped, 1)
@@ -250,7 +253,7 @@ class WebResearch(unittest.TestCase):
             {"type": "text", "text": "```json\n" + json.dumps(self.ANSWER) + "\n```"}]}
         urlopen, calls = self._fake([reply])
         with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
-            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            r = research.SalaryResearch(ANTH, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
             e = r.estimate(job(), "acme.com")
             e2 = r.estimate(job(job_id="2"), "acme.com")  # same company + level: cache hit
         self.assertEqual(len(calls), 1)
@@ -265,24 +268,96 @@ class WebResearch(unittest.TestCase):
         done = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps(self.ANSWER)}]}
         urlopen, calls = self._fake([pause, done])
         with tempfile.TemporaryDirectory() as d, mock.patch("urllib.request.urlopen", urlopen):
-            e = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k").estimate(job())
+            e = research.SalaryResearch(ANTH, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k").estimate(job())
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1]["messages"][-1]["role"], "assistant")
         self.assertEqual(e.typical, 95000)
 
     def test_lookup_cap_and_no_key(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {}, clear=True):
-            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d))
+            r = research.SalaryResearch(ANTH, sal.Profile(), {"EUR": 1.0}, Path(d))
             self.assertIsNone(r.estimate(job()))
-            capped = research.SalaryResearch({"max_lookups_per_run": 0}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            capped = research.SalaryResearch(dict(ANTH, max_lookups_per_run=0), sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
             self.assertIsNone(capped.estimate(job()))
             self.assertEqual(capped.skipped, 1)
 
     def test_implausible_estimate_rejected(self):
         with tempfile.TemporaryDirectory() as d:
-            r = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
+            r = research.SalaryResearch(ANTH, sal.Profile(), {"EUR": 1.0}, Path(d), api_key="k")
             self.assertIsNone(r._to_estimate({"currency": "EUR", "base_typical": 95}, "senior"))
             self.assertIsNone(r._to_estimate({"currency": "XYZ", "base_typical": 95000}, "senior"))
+
+
+class FakeBackend:
+    def __init__(self, name, behaviour):
+        self.name, self.behaviour, self.calls = name, behaviour, []
+
+    def create(self, body):
+        self.calls.append(body)
+        b = self.behaviour
+        if isinstance(b, Exception):
+            raise b
+        if callable(b):
+            return b(body)
+        return b
+
+
+ANSWER_TEXT = json.dumps({"currency": "EUR", "level": "L4", "base_low": 80000, "base_typical": 90000,
+                          "base_high": 100000, "negotiation_room": "medium", "confidence": "high"})
+OK = {"stop_reason": "end_turn", "content": [{"type": "text", "text": ANSWER_TEXT}]}
+
+
+class BackendRouting(unittest.TestCase):
+    def test_bedrock_first_when_it_works(self):
+        bed, anth = FakeBackend("bedrock", OK), FakeBackend("anthropic", OK)
+        r = llm.Router([bed, anth])
+        _, name, searched = r.create({"messages": [{"role": "user", "content": "q"}], "tools": [1]})
+        self.assertEqual((name, searched, len(anth.calls)), ("bedrock", True, 0))
+
+    def test_expired_bedrock_falls_back_and_stays_down(self):
+        bed = FakeBackend("bedrock", llm.Unavailable("ExpiredTokenException"))
+        anth = FakeBackend("anthropic", OK)
+        r = llm.Router([bed, anth])
+        body = {"messages": [{"role": "user", "content": "q"}], "tools": [1]}
+        self.assertEqual(r.create(body)[1], "anthropic")
+        r.create(body)
+        self.assertEqual(len(bed.calls), 1)  # not retried after going down
+        self.assertIn("bedrock", r.down)
+
+    def test_bedrock_without_web_search_falls_back_to_anthropic(self):
+        bed = FakeBackend("bedrock", llm.SearchUnsupported("tool type web_search not supported"))
+        anth = FakeBackend("anthropic", OK)
+        _, name, searched = llm.Router([bed, anth]).create({"messages": [{"role": "user", "content": "q"}], "tools": [1]})
+        self.assertEqual((name, searched), ("anthropic", True))
+
+    def test_no_search_mode_only_when_allowed(self):
+        def bedrock(body):
+            if "tools" in body:
+                raise llm.SearchUnsupported("web_search not supported")
+            return OK
+        body = {"messages": [{"role": "user", "content": "q"}], "tools": [1]}
+        with self.assertRaises(llm.CallFailed):
+            llm.Router([FakeBackend("bedrock", bedrock)]).create(body)
+        bed = FakeBackend("bedrock", bedrock)
+        _, name, searched = llm.Router([bed], allow_without_search=True).create(body)
+        self.assertEqual((name, searched), ("bedrock", False))
+        self.assertNotIn("tools", bed.calls[-1])
+        self.assertIn("Web search is not available", bed.calls[-1]["messages"][0]["content"])
+
+    def test_unsearched_estimate_is_low_confidence_and_labelled(self):
+        def bedrock(body):
+            if "tools" in body:
+                raise llm.SearchUnsupported("web_search not supported")
+            return OK
+        router = llm.Router([FakeBackend("bedrock", bedrock)], allow_without_search=True)
+        with tempfile.TemporaryDirectory() as d:
+            e = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), router=router).estimate(job())
+        self.assertEqual((e.basis, e.confidence), ("model knowledge (no web search)", "low"))
+
+    def test_nothing_configured(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            r = llm.build_router({"providers": ["anthropic"]})
+        self.assertFalse(r.available)
 
 
 class HunterLookup(unittest.TestCase):

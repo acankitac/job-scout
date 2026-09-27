@@ -41,7 +41,8 @@ reports/jobs-2026-09-27.md
   recruiters first, plus ready-made LinkedIn searches for each company's recruiters and
   engineering managers.
 - **De-duplication.** One role posted in five countries shows up once.
-- **Zero dependencies.** Standard-library Python 3.11+. Nothing to install.
+- **Zero dependencies for the core.** Standard-library Python 3.11+. Research runs on Amazon
+  Bedrock (needs `boto3`) or the Anthropic API, with automatic fallback between them.
 
 ## Quick start
 
@@ -96,6 +97,7 @@ job_scout/
   salary.py           salary judgement, company-band estimates, negotiation headroom
   experience.py       experience fit from the JD or researched level expectations
   research.py         salary and experience web research (Claude + web search, trusted sites only)
+  llm.py              research backends: Amazon Bedrock, Anthropic API, with fallback
   textutil.py         salary and experience parsing from description text
   contacts.py         Hunter.io lookup and LinkedIn links
   report.py           Markdown and CSV output

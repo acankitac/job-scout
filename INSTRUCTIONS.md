@@ -105,14 +105,29 @@ negotiation are marked 🤝 in the report. For those, open by asking for the top
 
 **Set up web research** (used for both unlisted salaries and unstated experience)
 
-1. Create an API key at [console.anthropic.com](https://console.anthropic.com).
-2. Set it in your shell (add the line to `~/.zshrc` to make it permanent):
+Research runs on **Amazon Bedrock** and/or the **Anthropic API**, tried in the order set by
+`providers` in `[research]` (default: Bedrock first, then Anthropic). If a backend's credentials
+are missing or expired, the model isn't enabled, or it can't run the web-search tool, the tool
+says so once and uses the next one for the rest of the run.
 
-   ```bash
-   export ANTHROPIC_API_KEY=your_key_here
-   ```
+*Bedrock:* put credentials with `bedrock:InvokeModel` permission (and `bedrock:ListInferenceProfiles`
+for `bedrock_model_id = "auto"`) under a profile in `~/.aws/credentials`, and set
+`bedrock_profile` and `bedrock_region`. Claude must be enabled for the account in that region.
+Use a personal AWS account: calls are billed to and logged against whichever account you use.
 
-3. Fill in `[profile]` in `config.toml` (years of experience, city, country, currency).
+*Anthropic:* create an API key at [console.anthropic.com](https://console.anthropic.com) and set it
+in your shell (add the line to `~/.zshrc` to make it permanent):
+
+```bash
+export ANTHROPIC_API_KEY=your_key_here
+```
+
+Either way, fill in `[profile]` in `config.toml` (years of experience, city, country, currency).
+
+**Web search matters.** Estimates are only as good as their sources, so a backend that can't run
+Claude's web-search tool is skipped by default. Set `allow_without_web_search = true` to accept
+answers from model knowledge instead; they're labelled "model knowledge (no web search)", carry
+low confidence and no sources, and are re-checked after 3 days rather than 30.
 
 Each lookup costs roughly $0.05–0.20. Results are cached for 30 days: salary per company +
 level + country, experience per company + title ("Senior Software Engineer - Payments" and
@@ -237,9 +252,12 @@ Every option overrides `config.toml` for that run only.
 | `hunter ...: HTTP 401` | The API key is wrong or not exported in this shell. |
 | `hunter ...: HTTP 429 (quota exhausted?)` | Monthly free lookups are used up. Cached companies still work. |
 | Salary looks wrong | If it's marked "(parsed)" it was read from the description and may be a different region's pay band. Check the posting. |
-| `salary research ...: HTTP 401` | `ANTHROPIC_API_KEY` is wrong or not exported in this shell. |
+| `research: bedrock unavailable ... ExpiredToken` or `invalid security token` | The Bedrock profile's credentials have expired. Refresh them; the run falls back to Anthropic meanwhile. |
+| `research: bedrock can't run web search` | Bedrock rejected the web-search tool in that region or for that model. Research falls back to Anthropic, or see `allow_without_web_search`. |
+| `research: bedrock skipped: boto3 is not installed` | `pip install boto3`, or remove `"bedrock"` from `providers`. |
+| `...anthropic: HTTP 401` | `ANTHROPIC_API_KEY` is wrong or not exported in this shell. |
 | "N roles skipped, max_lookups_per_run reached" | Rerun; finished lookups are cached, so it continues where it stopped. |
-| "N roles don't state years of experience; kept" | Set `ANTHROPIC_API_KEY` to research them, or check those roles by hand. |
+| "N roles don't state years of experience; kept" | No research backend was available. Set one up (step 4), or check those roles by hand. |
 | A role was rejected for experience you think is wrong | `--explain` shows whether it came from the description or research. Delete its file in `.cache/experience/` to research again. |
 | An estimate looks off | Delete its file in `.cache/salary/` and rerun, or check the linked sources in the report. |
 

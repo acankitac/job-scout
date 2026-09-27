@@ -119,12 +119,24 @@ medium = 8
 high = 15      # offers routinely negotiated up
 
 # Web research with Claude, restricted to trusted salary and career-data sources, for what a
-# posting doesn't state: pay, and the experience a role expects. Needs ANTHROPIC_API_KEY.
-# Each lookup costs roughly $0.05–0.20 in API usage. Results are cached (salary per company +
-# level + country, experience per company + title), so only the first run costs anything.
+# posting doesn't state: pay, and the experience a role expects.
+# Each lookup costs roughly $0.05–0.20. Results are cached (salary per company + level +
+# country, experience per company + title), so only the first run costs anything.
 [research]
 enabled = true
+# Backends, tried in order. A backend is skipped for the rest of the run if its credentials
+# are missing or expired, the model isn't enabled, or it can't run the web-search tool.
+providers = ["bedrock", "anthropic"]
+# Amazon Bedrock: an AWS profile from ~/.aws/credentials with bedrock:InvokeModel access.
+bedrock_profile = "bedrock"
+bedrock_region = "us-west-2"
+bedrock_model_id = "auto"        # "auto" = newest Claude Sonnet inference profile in the region
+# Anthropic API: reads ANTHROPIC_API_KEY from the environment.
 model = "claude-sonnet-5"
+# If no backend can web-search, answer from model knowledge instead? Such answers have no
+# sources, are marked "model knowledge (no web search)" with low confidence, and can reject
+# roles, so this is off by default.
+allow_without_web_search = false
 max_lookups_per_run = 20             # hard cap on paid salary lookups per run
 experience = true                    # research experience when the JD doesn't state it
 max_experience_lookups_per_run = 20  # hard cap on paid experience lookups per run

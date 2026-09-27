@@ -4,24 +4,20 @@ Uses Claude with web search, restricted to an allowlist of salary and career-dat
 the company's own domain, so answers rest on sources you'd trust yourself. Results are cached
 and the number of paid lookups per run is capped.
 
-Needs ANTHROPIC_API_KEY. Without it nothing is looked up, and roles are kept rather than
-rejected on a guess.
+Runs on Amazon Bedrock and/or the Anthropic API (see llm.py), tried in the configured order.
+With neither available nothing is looked up, and roles are kept rather than rejected on a guess.
 """
 import hashlib
 import json
-import os
 import re
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
 from .models import Job
 from .experience import YoeEstimate, title_stem
+from .llm import CallFailed, Router, build_router
 from .salary import Estimate, Profile, infer_level
-
-API_URL = "https://api.anthropic.com/v1/messages"
 
 DEFAULT_DOMAINS = [
     "levels.fyi", "glassdoor.com", "glassdoor.de", "glassdoor.co.uk", "kununu.com",
@@ -90,16 +86,17 @@ class ResearchError(Exception):
 
 
 class WebResearch:
-    """Shared plumbing: API key, cache, per-run cap, and the web-search conversation."""
+    """Shared plumbing: backends, cache, per-run cap, and the web-search conversation."""
     label = "research"
     cap_key = "max_lookups_per_run"
 
-    def __init__(self, cfg: dict, profile: Profile, cache_dir: Path, api_key: str = None):
+    def __init__(self, cfg: dict, profile: Profile, cache_dir: Path, api_key: str = None,
+                 router: Router = None):
         self.cfg = cfg
         self.profile = profile
         self.cache_dir = cache_dir
-        self.key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self.model = cfg.get("model", "claude-sonnet-5")
+        self.router = router or build_router(cfg, api_key)
+        self.disabled = False  # set to stop paid lookups; cached answers are still used
         self.tool = cfg.get("tool_version", "web_search_20250305")
         self.max_searches = cfg.get("max_searches_per_lookup", 5)
         self.max_lookups = cfg.get(self.cap_key, 20)
@@ -111,7 +108,7 @@ class WebResearch:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.key) and self.cfg.get("enabled", True)
+        return not self.disabled and self.router.available and self.cfg.get("enabled", True)
 
     def _cache_path(self, *parts: str) -> Path:
         k = "|".join(parts).lower()
@@ -120,8 +117,13 @@ class WebResearch:
 
     def _lookup(self, path: Path, prompt: str, domain: str, what: str) -> Optional[dict]:
         """Cached answer if fresh; otherwise a paid lookup, if enabled and under the cap."""
-        if path.exists() and time.time() - path.stat().st_mtime < self.ttl:
-            return json.loads(path.read_text())
+        if path.exists():
+            cached = json.loads(path.read_text())
+            # Answers given without a live search are kept only briefly, so a later run with a
+            # search-capable backend replaces them.
+            ttl = self.ttl if cached.get("_searched", True) else 3 * 86400
+            if time.time() - path.stat().st_mtime < ttl:
+                return cached
         if not self.enabled:
             return None
         if self.lookups >= self.max_lookups:
@@ -137,27 +139,23 @@ class WebResearch:
         path.write_text(json.dumps(data, indent=1))
         return data
 
-    def _post(self, body: dict) -> dict:
-        req = urllib.request.Request(API_URL, data=json.dumps(body).encode(), method="POST", headers={
-            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:300]
-            raise ResearchError(f"HTTP {e.code}: {detail}") from None
-        except (urllib.error.URLError, TimeoutError) as e:
-            raise ResearchError(str(e)) from None
-
     def _ask(self, prompt: str, domain: str) -> dict:
         domains = list(dict.fromkeys(self.domains + ([domain] if domain else [])))
         messages = [{"role": "user", "content": prompt}]
-        body = {"model": self.model, "max_tokens": 3000, "messages": messages,
+        body = {"max_tokens": 3000, "messages": messages,
                 "tools": [{"type": self.tool, "name": "web_search", "max_uses": self.max_searches,
                            "allowed_domains": domains}]}
         found, text = [], ""
-        for _ in range(4):  # server-side tool use can pause long turns; resume them
-            resp = self._post(body)
+        try:
+            resp, backend, searched = self.router.create(body)
+        except CallFailed as e:
+            raise ResearchError(str(e)) from None
+        for turn in range(4):  # server-side tool use can pause long turns; resume them
+            if turn:
+                try:
+                    resp = self.router.resume(backend, body, searched)
+                except CallFailed as e:
+                    raise ResearchError(str(e)) from None
             for block in resp.get("content", []):
                 if block.get("type") == "text":
                     text += block.get("text", "")
@@ -173,7 +171,17 @@ class WebResearch:
             raise ResearchError("model did not return a JSON answer")
         if not data.get("sources"):
             data["sources"] = found[:5]
+        data["_backend"], data["_searched"] = backend, searched
         return data
+
+    @staticmethod
+    def _basis(data: dict) -> str:
+        return "web research" if data.get("_searched", True) else "model knowledge (no web search)"
+
+    @staticmethod
+    def _confidence(data: dict) -> str:
+        c = str(data.get("confidence", "low")).lower()
+        return c if data.get("_searched", True) else "low"
 
     @staticmethod
     def _sources(data: dict) -> list:
@@ -184,8 +192,9 @@ class SalaryResearch(WebResearch):
     """Base-salary range and negotiation room, cached per (company, level, country)."""
     label = "salary research"
 
-    def __init__(self, cfg: dict, profile: Profile, fx: dict, cache_dir: Path, api_key: str = None):
-        super().__init__(cfg, profile, cache_dir, api_key)
+    def __init__(self, cfg: dict, profile: Profile, fx: dict, cache_dir: Path, api_key: str = None,
+                 router: Router = None):
+        super().__init__(cfg, profile, cache_dir, api_key, router)
         self.fx = fx
 
     def estimate(self, job: Job, domain: str = "") -> Optional[Estimate]:
@@ -216,7 +225,7 @@ class SalaryResearch(WebResearch):
         room = str(data.get("negotiation_room", "unknown")).lower()
         return Estimate(
             low=low or typ, typical=typ, high=high, level=str(data.get("level") or level),
-            basis="web research", confidence=str(data.get("confidence", "low")).lower(),
+            basis=self._basis(data), confidence=self._confidence(data),
             room=room if room in ("low", "medium", "high") else "unknown",
             notes=str(data.get("notes", ""))[:400], sources=self._sources(data))
 
@@ -246,7 +255,7 @@ class ExperienceResearch(WebResearch):
         if hi is not None and hi < lo:
             hi = None
         return YoeEstimate(min=lo, max=hi, typical=typ, level=str(data.get("level") or ""),
-                           basis="web research", confidence=str(data.get("confidence", "low")).lower(),
+                           basis=self._basis(data), confidence=self._confidence(data),
                            notes=str(data.get("notes", ""))[:400], sources=self._sources(data))
 
 

@@ -11,6 +11,7 @@ from .contacts import Hunter
 from .filters import Criteria, _any, dedupe, evaluate
 from .report import write_csv, write_markdown
 from .experience import judge_experience
+from .llm import build_router
 from .research import ExperienceResearch, SalaryResearch
 from .salary import (Negotiation, Profile, judge_estimate, judge_listed, listed_salary_usable,
                      sibling_estimate)
@@ -120,10 +121,12 @@ def main(argv=None):
     domains = {c["name"]: c.get("domain", "") for c in cfg["companies"]}
 
     # ---- experience: from the JD, else researched for the role's level ----
-    xp = ExperienceResearch(cfg.get("research", {}), profile, ROOT / ".cache" / "experience")
+    rcfg = cfg.get("research", {})
+    router = build_router(rcfg)  # shared, so a backend found unavailable is skipped for both
+    xp = ExperienceResearch(rcfg, profile, ROOT / ".cache" / "experience", router=router)
     xp_bounded = bool(crit.max_years_required or crit.min_years_expected)
-    if args.no_research or not xp_bounded or not cfg.get("research", {}).get("experience", True):
-        xp.key = None  # cached results are still used; no new paid lookups
+    if args.no_research or not xp_bounded or not rcfg.get("experience", True):
+        xp.disabled = True  # cached results are still used; no new paid lookups
     kept = []
     for j in matches:
         if j.yoe is None:
@@ -145,15 +148,15 @@ def main(argv=None):
               f"(rerun to continue; finished lookups are cached)", file=sys.stderr)
     unknown = sum(1 for j in matches if j.yoe is None)
     if xp_bounded and unknown:
-        hint = "" if xp.enabled or args.no_research else " (set ANTHROPIC_API_KEY to research them)"
+        hint = "" if xp.enabled or args.no_research else " (no research backend available; see [research])"
         print(f"{unknown} roles don't state years of experience; kept{hint}", file=sys.stderr)
 
     # ---- salary: listed ranges, then estimates for unlisted roles ----
     neg = Negotiation.from_dict(cfg.get("negotiation", {}))
     bounded = bool(crit.salary_min_eur or crit.salary_max_eur)
-    research = SalaryResearch(cfg.get("research", {}), profile, crit.fx_to_eur, ROOT / ".cache" / "salary")
+    research = SalaryResearch(rcfg, profile, crit.fx_to_eur, ROOT / ".cache" / "salary", router=router)
     if args.no_research or not (bounded or args.research):
-        research.key = None  # cached results are still used; no new paid lookups
+        research.disabled = True  # cached results are still used; no new paid lookups
     is_role = lambda title: not crit.title_include or _any(crit.title_include, title)
     kept = []
     for j in matches:
@@ -181,7 +184,7 @@ def main(argv=None):
               f"(rerun to continue; finished lookups are cached)", file=sys.stderr)
     unestimated = sum(1 for j in matches if not j.salary and not j.estimate)
     if bounded and unestimated:
-        hint = "" if research.enabled or args.no_research else " (set ANTHROPIC_API_KEY to research them)"
+        hint = "" if research.enabled or args.no_research else " (no research backend available; see [research])"
         print(f"{unestimated} roles list no salary and have no estimate; kept{hint}", file=sys.stderr)
 
     for j in matches:
@@ -192,6 +195,11 @@ def main(argv=None):
     matches.sort(key=lambda j: (-j.score, j.company, j.title))
     if args.top:
         matches = matches[: args.top]
+
+    for n in router.notices:
+        print(f"  ! research: {n}", file=sys.stderr)
+    if router.used:
+        print(f"research backends used: {', '.join(sorted(router.used))}", file=sys.stderr)
 
     # ---- contacts ----
     hunter = Hunter(ROOT / ".cache" / "hunter", ttl_days=cfg.get("hunter", {}).get("cache_days", 30))
