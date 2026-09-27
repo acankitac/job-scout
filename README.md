@@ -36,8 +36,10 @@ reports/jobs-2026-09-27.md
   things at different companies, so years of experience are read from the description; when it
   doesn't say, the company's typical experience for that level is researched.
 - **Salary estimates for roles that don't list pay.** From the company's own published bands
-  where possible, otherwise by web research on trusted salary sites. Every role is judged by
-  what you could reach **with negotiation**, and 🤝 marks the ones that need it.
+  where possible, otherwise by web research on trusted salary sites, with official German pay
+  statistics as a market check. Every role is judged by what you could reach **with
+  negotiation** (🤝 marks the ones that need it), and roles whose pay can't be verified are
+  listed separately instead of mixed in.
 - **Ranking against your own skills.** Weighted keywords, doubled when they appear in the title.
 - **Only what's new.** Every run remembers what you've already seen; `--new-only` shows the rest.
 - **Recruiter contacts.** Emails and titles via [Hunter.io](https://hunter.io), ranked with
@@ -105,6 +107,7 @@ job_scout/
   sources.py          company job boards: Greenhouse / Ashby / Lever (--companies)
   filters.py          criteria, scoring, de-duplication
   salary.py           salary judgement, company-band estimates, negotiation headroom
+  market.py           official German pay statistics (Entgeltatlas) as a market check
   experience.py       experience fit from the JD or researched level expectations
   research.py         salary and experience web research (Claude + web search, trusted sites only)
   llm.py              research backends: Amazon Bedrock, Anthropic API, with fallback

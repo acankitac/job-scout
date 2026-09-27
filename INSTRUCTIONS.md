@@ -115,15 +115,40 @@ those roles. It estimates them and judges every role by **what you could reach b
 | both | Both rules apply. |
 | neither | No salary filtering, and no paid research (company-posting estimates are still shown). |
 
-**Where an estimate comes from** (most trusted first)
+**How each role's pay is judged** (first match wins)
 
-1. **The company's own postings.** If the same company lists a salary on other roles at the same
+1. **Listed in the posting:** checked against your bounds.
+2. **The company's own postings.** If the same company lists a salary on other roles at the same
    level in your country, their published band is used. Free and usually accurate.
-2. **Web research.** Claude searches an allowlist of salary sources (levels.fyi, Glassdoor,
+3. **Web research.** Claude searches an allowlist of salary sources (levels.fyi, Glassdoor,
    kununu, StepStone, gehalt.de and others in `[research] trusted_domains`, plus the company's
-   own site). It works out the company's level for the role and your years of experience,
-   and returns a base-salary range for your country, how negotiable the company is, and its sources.
-3. **Neither available:** the role is kept and shown as "not listed".
+   own site) for the company's base-salary range at the role's level in your country, and how
+   negotiable it is. Best-scoring roles are researched first.
+4. **In your `high_payers` list:** kept in the main list as "high payer", even without data.
+5. **Market check.** Official German pay statistics (Bundesagentur Entgeltatlas) for that kind of
+   role and region show how much of the market pays your minimum. If a typical offer would have
+   to sit above the `unlikely_above_percentile` (default 75th) to reach it with negotiation, the
+   role is "unlikely"; otherwise "plausible" and it stays in the main list.
+6. **No data at all** (e.g. outside Germany): "unverified".
+
+"Unlikely" and "unverified" roles go to a separate **Salary not verified** section of the report,
+with the reason and the market figures, so the main list only holds roles whose pay is known or
+plausible. Set `[salary_check] unverified = "keep"` to leave them in the main list, or `"drop"`
+to hide them.
+
+For context on the market check: for experienced software developers in Berlin the official
+median is about €83k and €120k is roughly the top 13% of the market. The official figures stop at
+the social-insurance ceiling (about €97k/year), so the upper end is modelled from the median and
+25th percentile, which are always published. The market check can't tell a well-paying company
+from the rest; that's what research and `high_payers` are for.
+
+```toml
+[salary_check]
+unverified = "separate"          # separate | keep | drop
+market_data = true
+unlikely_above_percentile = 75
+high_payers = ["ExampleCorp", "SampleLabs"]
+```
 
 **How negotiation is counted.** Reachable pay = typical offer + headroom, capped at the top of the
 band. Headroom depends on how negotiable the company is (`[negotiation]`: 3% for fixed-pay
@@ -159,10 +184,19 @@ low confidence and no sources, and are re-checked after 3 days rather than 30.
 
 Each lookup costs roughly $0.05–0.20. Results are cached for 30 days: salary per company +
 level + country, experience per company + title ("Senior Software Engineer - Payments" and
-"Senior Software Engineer, Identity" share one lookup), so reruns are free. Each run makes at most
-`max_lookups_per_run` salary and `max_experience_lookups_per_run` experience lookups (default 20
-each); if a cap is hit, rerun to continue. Research only runs for roles that passed every other
-filter. Use `--no-research` to turn it off for a run, or `--research` to estimate even without a
+"Senior Software Engineer, Identity" share one lookup), so reruns are free. Research only runs
+for roles that passed every other filter, best matches first, `concurrency` (default 4) at a time.
+
+Lookups per run are capped **per backend** with `caps` (0 = unlimited). The default leaves Bedrock
+unlimited, bounded only by your account's own quotas (throttling is retried), and caps the
+Anthropic fallback at 20 per run to keep that bill predictable. When a cap is hit, the rest are
+left for the next run, which picks up where this one stopped.
+
+```toml
+[research]
+caps = { bedrock = 0, anthropic = 20 }
+concurrency = 4
+``` Use `--no-research` to turn it off for a run, or `--research` to estimate even without a
 salary bound.
 
 The report's **Salary estimates** section lists every estimate with its range, typical figure,
@@ -257,7 +291,7 @@ Every option overrides `config.toml` for that run only.
 # Daily check: just what's new, top 20
 ./scout.py --new-only --top 20
 
-# At least €90k, counting estimated and negotiated pay
+# At least €90k, counting estimated and negotiated pay; unverified roles listed separately
 ./scout.py --min-salary 90000
 
 # Only roles that actually publish a salary of at least €90k
@@ -292,7 +326,8 @@ Every option overrides `config.toml` for that run only.
 | `research: bedrock can't run web search` | Bedrock rejected the web-search tool in that region or for that model. Research falls back to Anthropic, or see `allow_without_web_search`. |
 | `research: bedrock skipped: boto3 is not installed` | `pip install boto3`, or remove `"bedrock"` from `providers`. |
 | `...anthropic: HTTP 401` | `ANTHROPIC_API_KEY` is wrong or not exported in this shell. |
-| "N roles skipped, max_lookups_per_run reached" | Rerun; finished lookups are cached, so it continues where it stopped. |
+| "N roles not researched, a per-run cap was reached" | Rerun; finished lookups are cached, so it continues where it stopped. Or raise `caps`. |
+| A company you know pays well is in "Salary not verified" | Add it to `[salary_check] high_payers`, or enable research. |
 | "N roles don't state years of experience; kept" | No research backend was available. Set one up (step 5), or check those roles by hand. |
 | A role was rejected for experience you think is wrong | `--explain` shows whether it came from the description or research. Delete its file in `.cache/experience/` to research again. |
 | An estimate looks off | Delete its file in `.cache/salary/` and rerun, or check the linked sources in the report. |

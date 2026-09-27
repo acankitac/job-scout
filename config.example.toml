@@ -95,6 +95,21 @@ DKK = 0.134
 NOK = 0.086
 PLN = 0.235
 
+# How roles that don't list pay are handled when salary_min_eur is set.
+[salary_check]
+# Roles with no listed salary, no estimate, and not a known high payer:
+#   "separate"  list them in their own "Salary not verified" section (default)
+#   "keep"      keep them in the main list
+#   "drop"      leave them out
+unverified = "separate"
+# Official German pay statistics (Bundesagentur Entgeltatlas) by role level and region. A role is
+# marked "unlikely" when a typical offer would need to sit above this percentile of the market,
+# before negotiation, to reach your minimum.
+market_data = true
+unlikely_above_percentile = 75
+# Employers you know pay at your level. Kept in the main list even without salary data.
+high_payers = []
+
 # ---------------------------------------------------------------------------------------
 # Market-wide search (the default). Searches job boards across the whole market rather than
 # a fixed company list. Use --companies to search only the [[companies]] boards below, or
@@ -159,9 +174,11 @@ model = "claude-sonnet-5"
 # sources, are marked "model knowledge (no web search)" with low confidence, and can reject
 # roles, so this is off by default.
 allow_without_web_search = false
-max_lookups_per_run = 20             # hard cap on paid salary lookups per run
 experience = true                    # research experience when the JD doesn't state it
-max_experience_lookups_per_run = 20  # hard cap on paid experience lookups per run
+# Lookups per run, per backend; 0 = unlimited. Bedrock is limited only by your account's own
+# quotas (throttling is retried). The Anthropic fallback is capped to keep its bill predictable.
+caps = { bedrock = 0, anthropic = 20 }
+concurrency = 4                      # lookups run in parallel
 max_searches_per_lookup = 5
 cache_days = 30
 trusted_domains = [

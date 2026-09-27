@@ -19,7 +19,12 @@ def _salary_cell(job, fx):
         e = job.estimate
         rng = f"{_k(e.low)}–{_k(e.high)}" if e.high else f"~{_k(e.typical)}"
         return f"est. {rng}{flag}"
-    if not job.salary:
+    if not job.salary or job.salary_status not in ("listed", ""):
+        # A salary quoted in the text but not used (e.g. another region's band) isn't shown here.
+        if job.salary_status == "high payer":
+            return "not listed · high payer"
+        if job.salary_status == "market plausible" and job.market_share_above_min is not None:
+            return f"not listed · {job.market_share_above_min:.0f}% of market pays your min"
         return "not listed"
     s = job.salary.display()
     if job.salary.currency != "EUR":
@@ -32,7 +37,7 @@ def _salary_cell(job, fx):
 def write_csv(path: Path, jobs, fx, neg):
     with path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["new", "score", "company", "title", "location", "salary", "salary_max_eur_year",
+        w.writerow(["new", "score", "company", "title", "location", "salary_status", "salary", "salary_max_eur_year",
                     "est_low_eur", "est_typical_eur", "est_high_eur", "est_reach_with_negotiation_eur",
                     "est_basis", "est_confidence", "negotiate_to_meet_minimum",
                     "years_min", "years_max", "years_basis", "posted", "matched_keywords", "url"])
@@ -40,7 +45,7 @@ def write_csv(path: Path, jobs, fx, neg):
             _, hi = j.salary.to_eur_year(fx) if j.salary else (None, None)
             e = j.estimate
             w.writerow(["NEW" if j.is_new else "", j.score, j.company, j.title, j.location,
-                        j.salary.display() if j.salary else "", f"{hi:.0f}" if hi else "",
+                        j.salary_status, j.salary.display() if j.salary else "", f"{hi:.0f}" if hi else "",
                         f"{e.low:.0f}" if e else "", f"{e.typical:.0f}" if e else "",
                         f"{e.high:.0f}" if e and e.high else "", f"{j.reach:.0f}" if e and j.reach else "",
                         e.basis if e else "", e.confidence if e else "", "yes" if j.negotiate else "",
@@ -101,12 +106,35 @@ def _experience_section(jobs):
     return out
 
 
-def write_markdown(path: Path, jobs, cfg, crit, neg, contacts, failures, stats, hunter_enabled):
+def _unverified_section(side, crit):
+    if not side:
+        return []
+    out = ["## Salary not verified", "",
+           f"These fit everything else, but nothing shows they pay your €{crit.salary_min_eur:,.0f} minimum: "
+           "no salary listed, no estimate, and the employer isn't in your `high_payers` list. "
+           "\"Market\" is official pay data (Bundesagentur Entgeltatlas) for that kind of role in that "
+           "region: 25th percentile / median / 75th percentile per year.", "",
+           "| Score | Company | Role | Location | Yrs | Why | Market |", "|---|---|---|---|---|---|---|"]
+    for j in side:
+        loc = j.location if len(j.location) <= 45 else j.location[:42] + "..."
+        if j.salary_status == "market unlikely":
+            why = (f"only ~{j.market_share_above_min:.0f}% of the {j.market.region} market "
+                   f"({j.market.level}) pays this")
+        else:
+            why = "no pay data (outside Germany or unmapped)" if not j.market else "no pay data"
+        out.append(f"| {j.score} | {j.company} | [{j.title.replace('|', '/')}]({j.url}) | "
+                   f"{loc.replace('|', '/')} | {j.yoe.display() if j.yoe else '?'} | {why} | "
+                   f"{j.market.display() if j.market else ''} |")
+    return out + [""]
+
+
+def write_markdown(path: Path, jobs, side, cfg, crit, neg, contacts, failures, stats, hunter_enabled):
     now = datetime.now()
     out = [f"# Job scout report, {now:%Y-%m-%d %H:%M}", ""]
     new = sum(j.is_new for j in jobs)
     out += [f"**{len(jobs)} matching jobs** ({new} new since last run) from "
-            f"{stats['fetched']} postings across {stats['companies']} companies.", ""]
+            f"{stats['fetched']} postings across {stats['companies']} companies"
+            + (f", plus {len(side)} with unverified salary (listed separately)." if side else "."), ""]
     crit_bits = [f"locations: {', '.join(crit.locations) or 'any'}"]
     if crit.allow_remote:
         crit_bits.append(f"remote in: {', '.join(crit.remote_regions) or 'anywhere'}")
@@ -136,6 +164,7 @@ def write_markdown(path: Path, jobs, cfg, crit, neg, contacts, failures, stats, 
                "(see Experience research); ? = not stated and not researched. 🤝 = meets your salary "
                "minimum only with negotiation.")
     out.append("")
+    out += _unverified_section(side, crit)
     out += _estimates_section(jobs, neg)
     out += _experience_section(jobs)
 

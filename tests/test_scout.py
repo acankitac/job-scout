@@ -417,6 +417,75 @@ class MarketSearch(unittest.TestCase):
         self.assertIsNotNone(prefilter(job(location="Paris"), c))
 
 
+class MarketCheck(unittest.TestCase):
+    # Berlin, Experte level, as published: 75th percentile withheld above the ceiling.
+    ROWS = [{"ageCategory": {"id": 1}, "gender": {"id": 1}, "branche": {"id": 1}, "entgelt": 6913,
+             "entgeltQ25": 5540, "entgeltQ75": -2, "region": {"beitragsBemessungsGrenze": 8050}}]
+
+    def _market(self, d):
+        from job_scout import market as mk
+        m = mk.MarketData(Path(d))
+        m._fetch = lambda kldb, region: self.ROWS
+        return m
+
+    def test_withheld_q75_uses_lognormal_fit(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = self._market(d).stat(job(title="Senior Backend Engineer", location="Berlin, Germany"), sal.Profile())
+        self.assertEqual((st.region, st.level, st.q75), ("Berlin", "Experte", None))
+        self.assertAlmostEqual(st.percentile(st.median), 50, places=5)
+        self.assertAlmostEqual(st.percentile(st.q25), 25, delta=0.5)
+        self.assertAlmostEqual(100 - st.percentile(120000), 13, delta=1.5)
+        self.assertAlmostEqual(st.value_at(st.percentile(100000)), 100000, delta=50)
+
+    def test_region_mapping(self):
+        from job_scout.market import region_for
+        p = sal.Profile(city="Berlin", country="Germany", country_aliases=["Deutschland"])
+        self.assertEqual(region_for(job(location="München, Germany"), p), "Bayern")
+        self.assertEqual(region_for(job(location="Hamburg or Berlin"), p), "Berlin")
+        self.assertEqual(region_for(job(location="Somewhere, Germany"), p), "Deutschland")
+        self.assertIsNone(region_for(job(location="Zurich, Switzerland"), p))
+
+    def test_unverified_status(self):
+        from job_scout.cli import _unverified_status
+        c = Criteria(salary_min_eur=120000)
+        with tempfile.TemporaryDirectory() as d:
+            m = self._market(d)
+            startup = job(company="Tiny GmbH", location="Berlin, Germany")
+            self.assertEqual(_unverified_status(startup, c, sal.Negotiation(), sal.Profile(), m, set(), 75),
+                             "market unlikely")
+            self.assertAlmostEqual(startup.market_share_above_min, 13, delta=1.5)
+            big = job(company="Bigco SE", location="Berlin, Germany")
+            self.assertEqual(_unverified_status(big, c, sal.Negotiation(), sal.Profile(), m, {"bigco"}, 75),
+                             "high payer")
+            low = Criteria(salary_min_eur=80000)
+            self.assertEqual(_unverified_status(job(location="Berlin"), low, sal.Negotiation(), sal.Profile(), m, set(), 75),
+                             "market plausible")
+            abroad = job(location="Zurich, Switzerland")
+            self.assertEqual(_unverified_status(abroad, c, sal.Negotiation(), sal.Profile(), m, set(), 75), "unverified")
+
+
+class ResearchCaps(unittest.TestCase):
+    def test_per_backend_caps(self):
+        bed, anth = FakeBackend("bedrock", OK), FakeBackend("anthropic", OK)
+        r = llm.Router([bed, anth], caps={"bedrock": 0, "anthropic": 1})
+        body = {"messages": [{"role": "user", "content": "q"}], "tools": [1]}
+        for _ in range(5):
+            self.assertEqual(r.create(body)[1], "bedrock")  # 0 = unlimited
+        self.assertFalse(r.exhausted)
+
+    def test_fallback_backend_cap_stops_lookups(self):
+        bed = FakeBackend("bedrock", llm.Unavailable("expired"))
+        anth = FakeBackend("anthropic", OK)
+        router = llm.Router([bed, anth], caps={"anthropic": 1})
+        with tempfile.TemporaryDirectory() as d:
+            res = research.SalaryResearch({}, sal.Profile(), {"EUR": 1.0}, Path(d), router=router)
+            self.assertIsNotNone(res.estimate(job(company="A")))
+            self.assertIsNone(res.estimate(job(company="B")))
+        self.assertTrue(router.exhausted)
+        self.assertEqual((res.lookups, res.skipped, res.errors), (1, 1, []))
+        self.assertEqual(len(anth.calls), 1)
+
+
 class HunterLookup(unittest.TestCase):
     RESPONSE = {"data": {"pattern": "{first}.{last}", "emails": [
         {"value": "sam@acme.com", "first_name": "Sam", "last_name": "Lee", "position": "Office Manager",

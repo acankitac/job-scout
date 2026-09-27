@@ -57,6 +57,9 @@ class Job:
     reach: Optional[float] = None      # EUR/yr reachable with negotiation, for estimates
     negotiate: bool = False            # meets your minimum only if you negotiate
     yoe: Optional[object] = None       # experience.YoeEstimate, from the JD or researched
+    salary_status: str = ""          # listed / estimated / high payer / market plausible / market unlikely / unverified
+    market: Optional[object] = None    # market.MarketStat for the role's region and level
+    market_share_above_min: Optional[float] = None  # % of the market paid at least your minimum
     # Fetches the full description when a source's search results don't include it.
     loader: Optional[object] = field(default=None, repr=False, compare=False)
 

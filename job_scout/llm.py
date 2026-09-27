@@ -6,6 +6,7 @@ can't run the web-search tool.
 """
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -124,9 +125,14 @@ class Router:
     """Tries backends in order. Prefers any backend that can web-search; uses a search-less
     answer only when allowed and nothing else worked."""
 
-    def __init__(self, backends: list, allow_without_search: bool = False):
+    def __init__(self, backends: list, allow_without_search: bool = False, caps: dict = None):
         self.backends = backends
         self.allow_without_search = allow_without_search
+        # Lookups per backend per run; 0 or missing = unlimited.
+        self.caps = {k: v for k, v in (caps or {}).items() if v}
+        self.calls = {}
+        self.capped = set()
+        self._lock = threading.Lock()
         self.down = {}         # name -> reason, for the rest of the run
         self.no_search = set()  # names that rejected the web-search tool
         self.notices = []
@@ -135,6 +141,21 @@ class Router:
     @property
     def available(self) -> bool:
         return any(b.name not in self.down for b in self.backends)
+
+    @property
+    def exhausted(self) -> bool:
+        """Every backend still up has hit its per-run cap."""
+        live = [b for b in self.backends if b.name not in self.down]
+        return bool(live) and all(b.name in self.capped for b in live)
+
+    def _take(self, name: str) -> bool:
+        with self._lock:
+            cap = self.caps.get(name)
+            if cap and self.calls.get(name, 0) >= cap:
+                self.capped.add(name)
+                return False
+            self.calls[name] = self.calls.get(name, 0) + 1
+            return True
 
     def _note(self, msg: str):
         if msg not in self.notices:
@@ -154,7 +175,7 @@ class Router:
         """Returns (response, backend name, searched)."""
         errors = []
         for b in self.backends:
-            if b.name in self.down or b.name in self.no_search:
+            if b.name in self.down or b.name in self.no_search or not self._take(b.name):
                 continue
             try:
                 resp = b.create(body)
@@ -173,7 +194,7 @@ class Router:
             bare["messages"] = [dict(m) for m in body["messages"]]
             bare["messages"][0]["content"] += NO_SEARCH_NOTE
             for b in self.backends:
-                if b.name in self.no_search and b.name not in self.down:
+                if b.name in self.no_search and b.name not in self.down and self._take(b.name):
                     try:
                         resp = b.create(bare)
                         self.used.add(b.name + " (no web search)")
@@ -183,7 +204,7 @@ class Router:
                     except CallFailed as e:
                         errors.append(f"{b.name}: {e}")
         reasons = errors + [f"{n}: {r}" for n, r in self.down.items()] + \
-            [f"{n}: no web search" for n in self.no_search]
+            [f"{n}: no web search" for n in self.no_search] + [f"{n}: per-run cap reached" for n in self.capped]
         raise CallFailed("; ".join(reasons) or "no research backend configured")
 
 
@@ -210,6 +231,6 @@ def build_router(cfg: dict, anthropic_key: Optional[str] = None) -> Router:
                 backends.append(AnthropicBackend(key, cfg.get("model", "claude-sonnet-5")))
         else:
             notices.append(f"unknown research provider {name!r} ignored")
-    router = Router(backends, cfg.get("allow_without_web_search", False))
+    router = Router(backends, cfg.get("allow_without_web_search", False), cfg.get("caps", {"anthropic": 20}))
     router.notices += notices
     return router

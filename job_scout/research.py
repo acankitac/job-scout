@@ -10,6 +10,7 @@ With neither available nothing is looked up, and roles are kept rather than reje
 import hashlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -99,12 +100,13 @@ class WebResearch:
         self.disabled = False  # set to stop paid lookups; cached answers are still used
         self.tool = cfg.get("tool_version", "web_search_20250305")
         self.max_searches = cfg.get("max_searches_per_lookup", 5)
-        self.max_lookups = cfg.get(self.cap_key, 20)
+        self.max_lookups = cfg.get(self.cap_key, 0)  # 0 = no overall limit; see Router caps
         self.ttl = cfg.get("cache_days", 30) * 86400
         self.domains = cfg.get("trusted_domains") or DEFAULT_DOMAINS
         self.lookups = 0
         self.skipped = 0
         self.errors = []
+        self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -126,13 +128,20 @@ class WebResearch:
                 return cached
         if not self.enabled:
             return None
-        if self.lookups >= self.max_lookups:
-            self.skipped += 1
-            return None
-        self.lookups += 1
+        with self._lock:
+            if (self.max_lookups and self.lookups >= self.max_lookups) or self.router.exhausted:
+                self.skipped += 1
+                return None
+            self.lookups += 1
         try:
             data = self._ask(prompt, domain)
         except ResearchError as e:
+            with self._lock:
+                self.lookups -= 1  # count only lookups that returned an answer
+                # Backend went down or hit its cap mid-run: the router already reported why.
+                if self.router.exhausted or not self.router.available:
+                    self.skipped += 1
+                    return None
             self.errors.append(f"{self.label} {what}: {e}")
             return None
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -197,6 +206,9 @@ class SalaryResearch(WebResearch):
         super().__init__(cfg, profile, cache_dir, api_key, router)
         self.fx = fx
 
+    def key(self, job: Job) -> tuple:
+        return (job.company, infer_level(job.title))
+
     def estimate(self, job: Job, domain: str = "") -> Optional[Estimate]:
         level = infer_level(job.title)
         p = self.profile
@@ -234,6 +246,9 @@ class ExperienceResearch(WebResearch):
     """Typical years of experience for a role's level, cached per (company, title stem)."""
     label = "experience research"
     cap_key = "max_experience_lookups_per_run"
+
+    def key(self, job: Job) -> tuple:
+        return (job.company, title_stem(job.title))
 
     def expected(self, job: Job, domain: str = "") -> Optional[YoeEstimate]:
         stem = title_stem(job.title)
