@@ -1,7 +1,7 @@
 # job-scout
 
-**A personal job-search tool that checks dozens of company job boards at once, filters them
-against your criteria, ranks what's left against your skills, and tells you who to contact.**
+**A personal job-search tool that searches the job market, filters it against your criteria,
+ranks what's left against your skills, and tells you who to contact.**
 
 One command, about fifteen seconds, and you get a ranked report of every open role that fits,
 with direct application links, salary where the company lists it, and the recruiters behind it.
@@ -10,9 +10,9 @@ Illustrative run:
 
 ```
 $ ./scout.py
-fetched 3120 postings from 12/12 companies
-collapsed 6 per-country duplicate postings
-31 matches (31 new)
+fetched 1434 postings from 677 employers (arbeitnow 950, arbeitsagentur 467, remotive 17)
+collapsed 4 per-country duplicate postings
+146 matches (146 new)
 reports/jobs-2026-09-27.md
 ```
 
@@ -25,8 +25,11 @@ reports/jobs-2026-09-27.md
 
 ## Features
 
-- **Any company on Greenhouse, Ashby or Lever.** Most tech companies hire through one of
-  these three; adding one takes four lines of config.
+- **Searches the market, not a list.** Germany's federal job board (Bundesagentur für Arbeit),
+  Arbeitnow, Remotive and, with a free key, Adzuna, queried with your search terms and places.
+  Duplicates across boards are merged.
+- **Optional watch-list mode.** `--companies` searches only the job boards of specific companies
+  you list (any company on Greenhouse, Ashby or Lever), `--all-sources` does both.
 - **Filters that match how job hunting actually works:** city, remote-within-region, salary
   range (converted to EUR), and role type.
 - **Experience fit from the job description, not the title.** "Staff" and "Lead" mean different
@@ -60,21 +63,27 @@ open reports/jobs-*.md
 ## How it works
 
 ```
-config.toml ──► fetch ──► filter ──► de-duplicate ──► experience ──► salary ────────────► contacts ──► report
-                Greenhouse  location   one role,          from the JD,    listed range        Hunter.io   .md
-                Ashby       role type  many postings      else researched or estimate:        LinkedIn    .csv
-                Lever       keywords                      for the level   company bands,      links
-                                                                          web research,
+config.toml ──► search ──► filter ──► de-duplicate ──► experience ──► salary ────────────► contacts ──► report
+                market     location   one role,          from the JD,    listed range        Hunter.io   .md
+                boards,    role type  many postings      else researched or estimate:        LinkedIn    .csv
+                or your    keywords                      for the level   company bands,      links
+                companies                                                 web research,
                                                                           + negotiation
 ```
 
-Most tech companies publish their open roles through an applicant tracking system, and the
-three big ones (Greenhouse, Ashby, Lever) expose an **official public JSON feed** of every
-listed job. job-scout reads those feeds directly. That means structured data, salary ranges
-when companies provide them, and nothing that breaks when a careers page is redesigned.
+By default job-scout searches market-wide sources with the terms and places in `[generic]`:
 
-Companies with their own career sites and no public feed can be listed in the config and
-appear in the report as pre-filled search links.
+| Source | Coverage | Key needed |
+|---|---|---|
+| Bundesagentur für Arbeit | Most jobs posted in Germany, often with a salary range | no |
+| Arbeitnow | Tech and English-speaking jobs in Germany and Europe | no |
+| Remotive | Remote jobs worldwide | no |
+| Adzuna | Large multi-country aggregator | free key |
+
+With `--companies`, it instead reads the official job feeds of the companies you list. Most tech
+companies hire through Greenhouse, Ashby or Lever, and each publishes a public JSON feed of every
+open role. That's useful as a watch-list for employers you care about most, since not every
+company posts to the general job boards.
 
 ## Responsible use
 
@@ -92,7 +101,8 @@ appear in the report as pre-filled search links.
 scout.py              entry point
 config.example.toml   template; copy to config.toml (git-ignored)
 job_scout/
-  sources.py          Greenhouse / Ashby / Lever fetchers
+  aggregators.py      market-wide sources: Bundesagentur, Arbeitnow, Remotive, Adzuna
+  sources.py          company job boards: Greenhouse / Ashby / Lever (--companies)
   filters.py          criteria, scoring, de-duplication
   salary.py           salary judgement, company-band estimates, negotiation headroom
   experience.py       experience fit from the JD or researched level expectations

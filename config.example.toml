@@ -19,14 +19,15 @@ include_unscoped_remote = false
 title_include = [
   "software engineer", "backend", "back-end", "back end", "platform engineer",
   "distributed systems", "infrastructure engineer", "systems engineer", "software developer",
-  "data engineer", "developer",
+  "data engineer", "developer", "entwickler", "software architect", "softwarearchitekt",
 ]
 # Seniority words (senior, staff, principal, lead, junior) are deliberately NOT excluded here:
 # titles are unreliable signals of level, so experience fit is judged from the job description
 # instead (see max_years_required below). Exclude role types you don't want, not levels.
 title_exclude = [
   "director", "head of", "\\bvp\\b", "manager",
-  "intern", "working student", "werkstudent",
+  "intern", "working student", "werkstudent", "praktik", "ausbildung", "duales studium",
+  "trainee", "abschlussarbeit", "thesis", "freelance", "freiberuf",
   "front[- ]?end", "ios", "android", "mobile", "designer", "sales", "solutions",
   "support", "customer success", "account executive", "recruit", "scientist", "research", "security analyst",
   "qa\\b", "test automation", "sre\\b", "site reliability",
@@ -95,6 +96,27 @@ NOK = 0.086
 PLN = 0.235
 
 # ---------------------------------------------------------------------------------------
+# Market-wide search (the default). Searches job boards across the whole market rather than
+# a fixed company list. Use --companies to search only the [[companies]] boards below, or
+# --all-sources for both.
+#   arbeitsagentur  Germany's federal job board; most jobs posted in Germany, often with salary
+#   arbeitnow       tech and English-speaking jobs in Germany/Europe
+#   remotive        remote jobs worldwide
+#   adzuna          large aggregator; needs a free key (ADZUNA_APP_ID, ADZUNA_APP_KEY), skipped without
+# ---------------------------------------------------------------------------------------
+[generic]
+sources = ["arbeitsagentur", "arbeitnow", "remotive", "adzuna"]
+# Search terms, sent to each source. German terms matter: many German postings use them.
+queries = ["backend engineer", "software engineer", "backend developer", "platform engineer",
+           "softwareentwickler backend", "java entwickler", "golang"]
+where = ["Berlin"]           # places to search around (sources that support location search)
+radius_km = 30
+max_pages = 3                # result pages per query and place
+arbeitnow_pages = 5          # arbeitnow has no search; this many pages are scanned and filtered
+max_detail_fetches = 250     # full descriptions fetched per run, for sources that need it
+adzuna_country = "de"
+
+# ---------------------------------------------------------------------------------------
 # Salary estimation for roles that don't list pay. Used only when salary_min_eur or
 # salary_max_eur is set (or with --research).
 # ---------------------------------------------------------------------------------------
@@ -150,6 +172,7 @@ trusted_domains = [
 
 [hunter]
 per_company = 5     # recruiter contacts listed per company
+max_lookups_per_run = 10  # new companies looked up per run, best matches first (free plan: ~25/month)
 cache_days = 30     # Hunter results are cached per domain for this long
 
 # Pre-filled search used for the "check by hand" links (LinkedIn Jobs, career sites).
@@ -158,6 +181,7 @@ query = "backend engineer"
 location = "Berlin"
 
 # ---------------------------------------------------------------------------------------
+# Specific companies' job boards. Used only with --companies or --all-sources.
 # Companies with a public ATS job board. `ats` is greenhouse, ashby or lever; `token` is the
 # board slug from their careers URL (e.g. job-boards.greenhouse.io/<token>). `domain` is used
 # for the recruiter email lookup. See INSTRUCTIONS.md, step 5, for how to find these.

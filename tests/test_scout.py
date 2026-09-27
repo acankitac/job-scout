@@ -360,6 +360,63 @@ class BackendRouting(unittest.TestCase):
         self.assertFalse(r.available)
 
 
+class MarketSearch(unittest.TestCase):
+    def _serve(self, routes):
+        def urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            for key, payload in routes.items():
+                if key in url:
+                    body = io.BytesIO(json.dumps(payload).encode())
+                    return mock.MagicMock(__enter__=lambda s: body, __exit__=lambda *a: False)
+            raise AssertionError(f"unexpected url {url}")
+        return urlopen
+
+    def test_arbeitsagentur_maps_salary_location_and_loads_details(self):
+        from job_scout import aggregators as ag
+        listing = {"ergebnisliste": [{
+            "referenznummer": "123-X", "stellenangebotsTitel": "Backend Engineer (m/w/d)", "firma": "Acme GmbH",
+            "stellenlokationen": [{"adresse": {"ort": "Berlin", "land": "DEUTSCHLAND"}}],
+            "homeofficemoeglich": True, "verguetungsangabe": "JAHRESGEHALT",
+            "gehaltsspanneVon": 70000.0, "gehaltsspanneBis": 85000.0,
+            "veroeffentlichungszeitraum": {"von": "2026-09-01"}}]}
+        detail = {"stellenangebotsBeschreibung": "Mindestens 5 Jahre Berufserfahrung mit Java."}
+        with mock.patch("urllib.request.urlopen", self._serve({"pc/v6/jobs": listing, "pc/v4/jobdetails": detail})):
+            jobs = ag.arbeitsagentur(["backend"], ["Berlin"], max_pages=1)
+            self.assertEqual(len(jobs), 1)
+            j = jobs[0]
+            self.assertEqual(j.location, "Berlin, Germany (home office possible)")
+            self.assertEqual((j.salary.min, j.salary.max, j.salary.currency), (70000.0, 85000.0, "EUR"))
+            self.assertEqual(j.description, "")
+            j.loader()
+        self.assertIn("5 Jahre", j.description)
+        self.assertEqual(j.url, "https://www.arbeitsagentur.de/jobsuche/jobdetail/123-X")
+
+    def test_arbeitnow_epoch_seconds(self):
+        from job_scout import aggregators as ag
+        page = {"data": [{"slug": "a", "company_name": "Acme", "title": "Backend Engineer", "description": "<p>x</p>",
+                          "remote": True, "url": "https://x", "tags": [], "location": "Berlin", "created_at": 1790541603}],
+                "links": {"next": None}}
+        with mock.patch("urllib.request.urlopen", self._serve({"arbeitnow.com": page})):
+            j = ag.arbeitnow(max_pages=1)[0]
+        self.assertEqual(j.published.year, 2026)
+        self.assertEqual(j.location, "Berlin (remote)")
+
+    def test_same_role_on_two_boards_collapses(self):
+        from job_scout.filters import company_key
+        self.assertEqual(company_key("Examplecorp SE"), company_key("Examplecorp"))
+        self.assertEqual(company_key("Sample Logistics SE & Co. KG"), company_key("Sample Logistics"))
+        a = job(company="Acme GmbH", title="Backend Engineer (m/w/d)", source="arbeitsagentur", location_reason="Berlin")
+        b = job(company="Acme", title="Backend Engineer", source="arbeitnow", job_id="2", location_reason="Berlin")
+        self.assertEqual(len(dedupe([a, b])), 1)
+
+    def test_prefilter_skips_description_fetch_for_obvious_misses(self):
+        from job_scout.filters import prefilter
+        c = Criteria(locations=["Berlin"], title_include=["backend"], title_exclude=["manager"])
+        self.assertIsNone(prefilter(job(), c))
+        self.assertIsNotNone(prefilter(job(title="Backend Engineering Manager"), c))
+        self.assertIsNotNone(prefilter(job(location="Paris"), c))
+
+
 class HunterLookup(unittest.TestCase):
     RESPONSE = {"data": {"pattern": "{first}.{last}", "emails": [
         {"value": "sam@acme.com", "first_name": "Sam", "last_name": "Lee", "position": "Office Manager",

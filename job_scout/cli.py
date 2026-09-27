@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
+from .aggregators import fetch_generic
 from .contacts import Hunter
-from .filters import Criteria, _any, dedupe, evaluate
+from .filters import Criteria, _any, dedupe, evaluate, prefilter
 from .report import write_csv, write_markdown
 from .experience import judge_experience
 from .llm import build_router
@@ -21,8 +22,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(prog="scout", description="Find matching jobs on company job boards.")
+    p = argparse.ArgumentParser(prog="scout", description="Find matching jobs across the job market.")
     p.add_argument("-c", "--config", default=str(ROOT / "config.toml"))
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--companies", action="store_true",
+                      help="search only the [[companies]] job boards in the config, not the whole market")
+    mode.add_argument("--all-sources", action="store_true",
+                      help="search the whole market and the [[companies]] job boards")
+    p.add_argument("--query", action="append", help="override [generic] queries (repeatable)")
+    p.add_argument("--where", action="append", help="override [generic] where (repeatable)")
     p.add_argument("--only", action="append", metavar="COMPANY", help="restrict to these companies (repeatable)")
     p.add_argument("--location", action="append", help="override criteria.locations (repeatable)")
     p.add_argument("--min-salary", type=float, help="minimum annual salary in EUR")
@@ -46,8 +54,7 @@ def load_config(path: str) -> dict:
                          f"  cp config.example.toml config.toml")
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
-    if not cfg.get("companies"):
-        raise SystemExit(f"{path}: no [[companies]] configured")
+    cfg.setdefault("companies", [])
     for c in cfg["companies"]:
         if c.get("ats") not in FETCHERS:
             raise SystemExit(f"{path}: company {c.get('name')!r} has unknown ats {c.get('ats')!r}; "
@@ -70,8 +77,12 @@ def main(argv=None):
     if args.max_age is not None:
         crit.max_age_days = args.max_age
 
-    companies = cfg["companies"]
-    if args.only:
+    use_market = not args.companies
+    use_boards = args.companies or args.all_sources
+    companies = cfg["companies"] if use_boards else []
+    if use_boards and not companies:
+        raise SystemExit(f"{args.config}: --companies needs [[companies]] entries in the config")
+    if args.only and companies:
         wanted = {o.lower() for o in args.only}
         companies = [c for c in companies if c["name"].lower() in wanted]
         if not companies:
@@ -79,7 +90,13 @@ def main(argv=None):
 
     # ---- fetch ----
     all_jobs, failures = [], []
+    gcfg = dict(cfg.get("generic", {}))
+    if args.query:
+        gcfg["queries"] = args.query
+    if args.where:
+        gcfg["where"] = args.where
     with ThreadPoolExecutor(max_workers=8) as pool:
+        market = pool.submit(fetch_generic, gcfg) if use_market else None
         futures = {pool.submit(FETCHERS[c["ats"]], c["name"], c["token"]): c for c in companies}
         for fut in as_completed(futures):
             c = futures[fut]
@@ -87,10 +104,33 @@ def main(argv=None):
                 all_jobs.extend(fut.result())
             except SourceError as e:
                 failures.append((c["name"], str(e)))
-    print(f"fetched {len(all_jobs)} postings from {len(companies) - len(failures)}/{len(companies)} companies",
-          file=sys.stderr)
+        if market:
+            jobs, fails = market.result()
+            all_jobs.extend(jobs)
+            failures.extend(fails)
+    if args.only and use_market:
+        wanted = {o.lower() for o in args.only}
+        all_jobs = [j for j in all_jobs if j.company.lower() in wanted or any(w in j.company.lower() for w in wanted)]
+    by_source = Counter(j.source for j in all_jobs)
+    print(f"fetched {len(all_jobs)} postings from {len({j.company for j in all_jobs})} employers "
+          f"({', '.join(f'{s} {n}' for s, n in by_source.most_common())})", file=sys.stderr)
     for name, err in failures:
         print(f"  ! {name}: {err}", file=sys.stderr)
+
+    # ---- fetch full descriptions where search results didn't include them ----
+    need = [j for j in all_jobs if j.loader and prefilter(j, crit) is None]
+    cap = gcfg.get("max_detail_fetches", 200)
+    if len(need) > cap:
+        print(f"  ! {len(need) - cap} postings not opened, max_detail_fetches ({cap}) reached", file=sys.stderr)
+    detail_errors = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for fut in [pool.submit(j.loader) for j in need[:cap]]:
+            try:
+                fut.result()
+            except SourceError:
+                detail_errors += 1
+    if detail_errors:
+        print(f"  ! {detail_errors} job descriptions couldn't be fetched; judged on title only", file=sys.stderr)
 
     # ---- filter ----
     matches, reasons = [], Counter()
@@ -202,13 +242,16 @@ def main(argv=None):
         print(f"research backends used: {', '.join(sorted(router.used))}", file=sys.stderr)
 
     # ---- contacts ----
-    hunter = Hunter(ROOT / ".cache" / "hunter", ttl_days=cfg.get("hunter", {}).get("cache_days", 30))
+    hcfg = cfg.get("hunter", {})
+    hunter = Hunter(ROOT / ".cache" / "hunter", ttl_days=hcfg.get("cache_days", 30),
+                    max_lookups=hcfg.get("max_lookups_per_run", 10))
     contacts, patterns = {}, {}
     if not args.no_contacts:
-        for company in dict.fromkeys(j.company for j in matches):
+        for company in dict.fromkeys(j.company for j in matches):  # best-scoring employers first
             contacts[company] = hunter.recruiters(domains.get(company, ""),
-                                                  limit=cfg.get("hunter", {}).get("per_company", 5))
-            patterns[company] = Hunter.pattern(domains.get(company, ""), hunter.cache_dir)
+                                                  limit=cfg.get("hunter", {}).get("per_company", 5),
+                                                  company=company)
+            patterns[company] = Hunter.pattern(domains.get(company, ""), hunter.cache_dir, company)
     cfg["_patterns"] = patterns
     for e in hunter.errors:
         print(f"  ! {e}", file=sys.stderr)
@@ -218,7 +261,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     md, csv_path = out / f"jobs-{today}.md", out / f"jobs-{today}.csv"
     write_markdown(md, matches, cfg, crit, neg, contacts, failures,
-                   {"fetched": len(all_jobs), "companies": len(companies) - len(failures)},
+                   {"fetched": len(all_jobs), "companies": len({j.company for j in all_jobs})},
                    hunter.enabled and not args.no_contacts)
     write_csv(csv_path, matches, crit.fx_to_eur, neg)
 

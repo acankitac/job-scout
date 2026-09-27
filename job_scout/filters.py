@@ -87,6 +87,17 @@ def score(job: Job, c: Criteria) -> tuple[int, list]:
     return total, matched
 
 
+def prefilter(job: Job, c: Criteria) -> Optional[str]:
+    """The checks that need no description: used before fetching one."""
+    if c.title_include and not _any(c.title_include, job.title):
+        return "title: no include pattern matched"
+    bad = _any(c.title_exclude, job.title)
+    if bad:
+        return f"title: matches exclude '{bad}'"
+    ok, why = check_location(job, c)
+    return None if ok else why
+
+
 def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[str]:
     """Annotate the job in place. Returns None if it passes, else "category: detail".
 
@@ -115,8 +126,19 @@ def evaluate(job: Job, c: Criteria, now: Optional[datetime] = None) -> Optional[
     return None
 
 
+_LEGAL = r"\b(gmbh|ag|se|kg|kgaa|co|inc|ltd|llc|plc|bv|b\.v|sarl|sas|oy|ab|group|gruppe|deutschland|germany)\b"
+
+
+def company_key(name: str) -> str:
+    """"Examplecorp SE" and "Examplecorp" are the same employer across sources."""
+    n = re.sub(r"\.(com|io|ai|de)\b", "", name.lower())
+    n = re.sub(_LEGAL, " ", n)
+    return re.sub(r"[^a-z0-9]+", "", n)
+
+
 def dedupe(jobs: list) -> list:
-    """Collapse one role posted several times (per country, or as parallel requisitions).
+    """Collapse one role posted several times (per country, as parallel requisitions, or on
+    several job boards).
 
     Same company and same title stem ("Backend Engineer / Spain / Remote" -> "backend engineer")
     means same role. The copy whose location matched most directly is kept.
@@ -124,7 +146,8 @@ def dedupe(jobs: list) -> list:
     groups = {}
     for j in jobs:
         stem = re.split(r"\s+[/|]\s+", j.title)[0].strip().lower()
-        k = (j.company, re.sub(r"\s+", " ", stem))
+        stem = re.sub(r"\s*\((m/w/d|w/m/d|m/f/d|f/m/d|all genders|gn\*?|d/f/m)\)", "", stem)
+        k = (company_key(j.company), re.sub(r"\s+", " ", stem).strip())
         groups.setdefault(k, []).append(j)
     out = []
     for group in groups.values():

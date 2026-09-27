@@ -11,8 +11,8 @@ cp config.example.toml config.toml
 ./scout.py --help
 ```
 
-`config.toml` is your personal copy and is git-ignored, so the companies you're targeting are
-never committed. Add your companies to it before the first run (step 6).
+`config.toml` is your personal copy and is git-ignored, so your criteria and any companies you
+list are never committed.
 
 ## 2. Your first run
 
@@ -20,7 +20,8 @@ never committed. Add your companies to it before the first run (step 6).
 ./scout.py
 ```
 
-This checks every company in your `config.toml` and writes two files:
+This searches the job market with the terms and places in `[generic]` in your `config.toml`
+and writes two files:
 
 - `reports/jobs-YYYY-MM-DD.md`: the report. Open it in any Markdown viewer, VS Code, or GitHub.
 - `reports/jobs-YYYY-MM-DD.csv`: the same jobs, for sorting and tracking in a spreadsheet.
@@ -30,12 +31,39 @@ The report has four sections:
 1. **Jobs**: every match, highest score first. 🆕 marks roles you haven't seen before, and
    "Yrs" is the experience the posting asks for.
 2. **Salary estimates**: for roles that don't list pay, an estimated range, what's reachable
-   with negotiation, and the sources (see step 4).
+   with negotiation, and the sources (see step 5).
 3. **Recruiter contacts**: for each company with matches, recruiter emails (if Hunter.io is
-   set up, see step 5) and LinkedIn search links.
+   set up, see step 6) and LinkedIn search links.
 4. **Check by hand**: search links for companies with no public job feed, plus LinkedIn Jobs.
 
-## 3. Set your criteria
+## 3. What to search
+
+`[generic]` in `config.toml` controls the market-wide search:
+
+```toml
+[generic]
+sources = ["arbeitsagentur", "arbeitnow", "remotive", "adzuna"]
+queries = ["backend engineer", "software engineer", "softwareentwickler backend"]
+where = ["Berlin", "München"]   # places to search around
+radius_km = 30
+```
+
+- **Queries** are sent to every source. Include German terms: many German employers use them.
+- **Where** sets the places searched by sources that support location search (Bundesagentur, Adzuna).
+  Your `locations` filter (step 4) then decides which results you see.
+- **Adzuna** needs a free key from [developer.adzuna.com](https://developer.adzuna.com):
+  `export ADZUNA_APP_ID=...` and `export ADZUNA_APP_KEY=...`. Without them it's skipped.
+- Override for one run: `./scout.py --query "golang" --where Hamburg`.
+
+**Watch-list mode.** Some companies, especially larger tech firms, post only on their own careers
+site. List them under `[[companies]]` (step 7) and run:
+
+```bash
+./scout.py --companies      # only your listed companies
+./scout.py --all-sources    # the market plus your listed companies
+```
+
+## 4. Set your criteria
 
 Open your `config.toml`. Everything under `[criteria]` is commented; these are the settings most
 people change first:
@@ -63,7 +91,7 @@ engineer "Member of Technical Staff", and "Lead" is often a hands-on engineer. S
 should list role *types* you don't want (manager, frontend, sales), not levels. Experience fit is
 judged from the job description instead: "5+ years", "3-5 years", "at least five years",
 "mindestens 5 Jahre" are all recognised. When the description doesn't say, which is common, the
-typical experience for that company's level for the role is researched online (see step 4 for
+typical experience for that company's level for the role is researched online (see step 5 for
 the API key). Without research those roles are kept and shown as "?", never rejected on a guess.
 The report's "Yrs" column shows what was found: `5+` from the description, `≈5–8*` researched.
 
@@ -73,7 +101,7 @@ for how roles that don't list pay are handled.
 **Tip:** after changing filters, run `./scout.py --explain` to see every rejected job and the
 reason, so you can tell whether a filter is too tight.
 
-## 4. Salary and experience research
+## 5. Salary and experience research
 
 Most European postings don't list pay. When you set a salary bound, job-scout doesn't drop
 those roles. It estimates them and judges every role by **what you could reach by negotiating**.
@@ -141,7 +169,7 @@ The report's **Salary estimates** section lists every estimate with its range, t
 reachable figure, negotiation room, confidence and source links. Treat web-research figures as a
 starting point for your own check, not a guarantee.
 
-## 5. Recruiter emails (optional)
+## 6. Recruiter emails (optional)
 
 1. Create a free account at [hunter.io](https://hunter.io) and copy your API key.
 2. Set it in your shell (add the line to `~/.zshrc` to make it permanent):
@@ -158,10 +186,12 @@ email format (e.g. `{first}.{last}@company.com`), useful for reaching a specific
 on LinkedIn.
 
 The free plan allows about 25 lookups a month. Results are cached for 30 days in `.cache/hunter/`,
-so repeat runs are free; only a company appearing for the first time costs a lookup. Use
-`--no-contacts` to skip lookups entirely.
+so repeat runs are free; only a company appearing for the first time costs a lookup. Because a
+market-wide search turns up hundreds of employers, each run looks up at most
+`max_lookups_per_run` (default 10) new companies, best matches first; companies without a known
+domain are looked up by name. Use `--no-contacts` to skip lookups entirely.
 
-## 6. Adding companies
+## 7. Adding companies (watch-list mode)
 
 Open the company's careers page, click into any job, and look at the address bar:
 
@@ -197,14 +227,18 @@ name = "ExampleCorp"
 url = "https://careers.examplecorp.com/search?q={query}&location={location}"
 ```
 
-## 7. Command-line options
+## 8. Command-line options
 
 Every option overrides `config.toml` for that run only.
 
 | Option | What it does |
 |---|---|
+| `--companies` | Search only the `[[companies]]` job boards, not the whole market |
+| `--all-sources` | Search the market and the `[[companies]]` job boards |
+| `--query TEXT` | Replace the `[generic]` search terms; repeat for several |
+| `--where PLACE` | Replace the `[generic]` places; repeat for several |
 | `--new-only` | Only roles not seen in a previous run |
-| `--only NAME` | Check only this company; repeat for several |
+| `--only NAME` | Keep only this employer (name match); repeat for several |
 | `--location CITY` | Replace the configured locations; repeat for several |
 | `--min-salary N` / `--max-salary N` | Annual salary bounds in EUR |
 | `--require-salary` | Drop jobs that don't list a salary |
@@ -217,7 +251,7 @@ Every option overrides `config.toml` for that run only.
 | `-c FILE` | Use a different config file |
 | `--out DIR` | Write reports somewhere other than `reports/` |
 
-## 8. Recipes
+## 9. Recipes
 
 ```bash
 # Daily check: just what's new, top 20
@@ -242,10 +276,12 @@ Every option overrides `config.toml` for that run only.
 0 8 * * * cd /path/to/job-scout && ./scout.py --new-only >> reports/cron.log 2>&1
 ```
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
+| `! arbeitnow: ... HTTP 429` | Arbeitnow throttled paging. Results from earlier pages are kept; lower `arbeitnow_pages` if it recurs. |
+| `N postings not opened, max_detail_fetches reached` | Raise `max_detail_fetches`, or narrow `queries`/`where`. Unopened postings are judged on title only. |
 | `! Company: board not found (404)` | The token is wrong or the company moved to another ATS. Recheck the job URL (step 5). |
 | A job you expected is missing | Run `--only Company --explain` and find it in the rejected list; the reason tells you which filter to loosen. |
 | Everything is 🆕 again | The seen-jobs memory is in `.state/seen.json`. It was deleted or you're running from a different folder. |
@@ -257,11 +293,11 @@ Every option overrides `config.toml` for that run only.
 | `research: bedrock skipped: boto3 is not installed` | `pip install boto3`, or remove `"bedrock"` from `providers`. |
 | `...anthropic: HTTP 401` | `ANTHROPIC_API_KEY` is wrong or not exported in this shell. |
 | "N roles skipped, max_lookups_per_run reached" | Rerun; finished lookups are cached, so it continues where it stopped. |
-| "N roles don't state years of experience; kept" | No research backend was available. Set one up (step 4), or check those roles by hand. |
+| "N roles don't state years of experience; kept" | No research backend was available. Set one up (step 5), or check those roles by hand. |
 | A role was rejected for experience you think is wrong | `--explain` shows whether it came from the description or research. Delete its file in `.cache/experience/` to research again. |
 | An estimate looks off | Delete its file in `.cache/salary/` and rerun, or check the linked sources in the report. |
 
-## 10. Running the tests
+## 11. Running the tests
 
 ```bash
 python3 -m unittest discover -s tests -t .

@@ -57,6 +57,8 @@ class Job:
     reach: Optional[float] = None      # EUR/yr reachable with negotiation, for estimates
     negotiate: bool = False            # meets your minimum only if you negotiate
     yoe: Optional[object] = None       # experience.YoeEstimate, from the JD or researched
+    # Fetches the full description when a source's search results don't include it.
+    loader: Optional[object] = field(default=None, repr=False, compare=False)
 
     @property
     def key(self) -> str:
