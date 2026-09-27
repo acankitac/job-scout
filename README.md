@@ -82,6 +82,9 @@ By default job-scout searches market-wide sources with the terms and places in `
 | Arbeitnow | Tech and English-speaking jobs in Germany and Europe | no |
 | Remotive | Remote jobs worldwide | no |
 | Adzuna | Large multi-country aggregator | free key |
+| jobs.ch | Switzerland's largest job portal | no |
+| Jobindex | Denmark's largest job portal | no |
+| LinkedIn | Every country; opt-in, see below | no |
 
 With `--companies`, it instead reads the official job feeds of the companies you list. Most tech
 companies hire through Greenhouse, Ashby or Lever, and each publishes a public JSON feed of every
@@ -90,8 +93,14 @@ company posts to the general job boards.
 
 ## Responsible use
 
-- **LinkedIn is never scraped.** Its terms prohibit automated access, and it restricts accounts
-  that do it. The report gives you LinkedIn search links to open yourself instead.
+- **LinkedIn is opt-in and logged-out only.** It reads LinkedIn's public job search, the version
+  shown to visitors without an account, so no login, cookie or account is ever used. LinkedIn's
+  terms and robots.txt don't permit automated access, so it's off in the example config, paced
+  at one request every 2 seconds, and stops for the run if LinkedIn pushes back. Enable it only
+  if you accept that.
+- **Other portals use sanctioned routes:** Jobindex's official RSS feeds, and jobs.ch's public
+  search pages (its API, which robots.txt disallows, isn't used). Every request identifies the
+  tool honestly.
 - **Web research only searches trusted salary and career-data sites** plus the company's own domain, and
   every estimate in the report links its sources.
 - **Recruiter data is personal data.** Hunter.io results are cached locally, git-ignored, and
@@ -105,6 +114,7 @@ scout.py              entry point
 config.example.toml   template; copy to config.toml (git-ignored)
 job_scout/
   aggregators.py      market-wide sources: Bundesagentur, Arbeitnow, Remotive, Adzuna
+  portals.py          private portals: LinkedIn (opt-in), jobs.ch, Jobindex
   sources.py          company job boards: Greenhouse / Ashby / Lever (--companies)
   filters.py          criteria, scoring, de-duplication
   salary.py           salary judgement, company-band estimates, negotiation headroom

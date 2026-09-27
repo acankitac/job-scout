@@ -55,6 +55,30 @@ radius_km = 30
   `export ADZUNA_APP_ID=...` and `export ADZUNA_APP_KEY=...`. Without them it's skipped.
 - Override for one run: `./scout.py --query "golang" --where Hamburg`.
 
+**Private portals.** `[portals]` adds jobs.ch (Switzerland), Jobindex (Denmark) and, if you opt
+in, LinkedIn, searched with a shorter query list because these sites are paced deliberately:
+
+```toml
+[portals]
+enabled = ["jobs.ch", "jobindex"]        # add "linkedin" to opt in
+queries = ["backend engineer", "software engineer"]
+jobs_ch_places = ["Zürich", "Basel", "Bern"]
+linkedin_places = ["Berlin, Germany", "Zurich, Switzerland", "Copenhagen, Denmark"]
+linkedin_days = 7
+```
+
+LinkedIn is read through its logged-out public job search: no account, login or cookie is used,
+so your account can't be affected. LinkedIn's terms and robots.txt don't permit automated
+access, so it's your call whether to enable it. It sends one request every 2 seconds and stops for
+the rest of the run on the first refusal (reported as `linkedin: HTTP 429/999, stopped for this
+run`). Keep `linkedin_places` in step with your `locations` filter; results elsewhere are
+fetched and then thrown away. Write places as "City, Country" ("Zurich, Switzerland"), because a
+bare city name can match a town of the same name elsewhere.
+
+**Speed.** The first run fetches every posting's full description and can take several minutes,
+mostly for LinkedIn. Descriptions are cached for three weeks (`.cache/descriptions/`), so later
+runs download only new postings and take about a minute.
+
 **Watch-list mode.** Some companies, especially larger tech firms, post only on their own careers
 site. List them under `[[companies]]` (step 7) and run:
 
@@ -348,7 +372,9 @@ Every option overrides `config.toml` for that run only.
 | Symptom | Cause and fix |
 |---|---|
 | `! arbeitnow: ... HTTP 429` | Arbeitnow throttled paging. Results from earlier pages are kept; lower `arbeitnow_pages` if it recurs. |
-| `N postings not opened, max_detail_fetches reached` | Raise `max_detail_fetches`, or narrow `queries`/`where`. Unopened postings are judged on title only. |
+| `N postings not opened, max_detail_fetches reached` | The limit is per source. Raise `max_detail_fetches`, or narrow `queries`/`where`. Unopened postings are judged on title only; the next run opens them from where this one stopped. |
+| `linkedin: HTTP 429` or `999, stopped for this run` | LinkedIn is refusing automated requests for now. The rest of the run continues without it; try again later, or with fewer `linkedin_places`/`queries`. |
+| `jobs.ch: page layout changed` | jobs.ch changed its pages; the parser needs updating. Other sources are unaffected. |
 | `! Company: board not found (404)` | The token is wrong or the company moved to another ATS. Recheck the job URL (step 5). |
 | A job you expected is missing | Run `--only Company --explain` and find it in the rejected list; the reason tells you which filter to loosen. |
 | Everything is 🆕 again | The seen-jobs memory is in `.state/seen.json`. It was deleted or you're running from a different folder. |

@@ -144,8 +144,26 @@ where = ["Berlin"]           # places to search around (sources that support loc
 radius_km = 30
 max_pages = 3                # result pages per query and place
 arbeitnow_pages = 5          # arbeitnow has no search; this many pages are scanned and filtered
-max_detail_fetches = 250     # full descriptions fetched per run, for sources that need it
+max_detail_fetches = 150     # full descriptions fetched per source per run, best titles first
 adzuna_country = "de"
+
+# ---------------------------------------------------------------------------------------
+# Private job portals, searched alongside the market sources with the [generic] queries.
+#   jobs.ch   Switzerland; public search pages (allowed by its robots.txt)
+#   jobindex  Denmark; official RSS feeds
+#   linkedin  every country; LinkedIn's logged-out public job search. No login or account is
+#             used, so your account is never at risk, but LinkedIn's terms and robots.txt don't
+#             permit automated access, so it's off unless you add it. It runs slowly on purpose
+#             (one request every 2 seconds), and stops for the run if LinkedIn pushes back.
+# ---------------------------------------------------------------------------------------
+[portals]
+enabled = ["jobs.ch", "jobindex"]   # add "linkedin" to opt in; read the note above first
+queries = ["backend engineer", "software engineer"]   # fewer than [generic]: these sites are slow
+pages = 2
+jobs_ch_places = ["Zürich", "Basel", "Bern"]
+linkedin_places = ["Berlin, Germany", "Zurich, Switzerland"]
+linkedin_days = 7       # only postings from the last N days
+linkedin_pages = 2      # 10 results per page
 
 # ---------------------------------------------------------------------------------------
 # Salary estimation for roles that don't list pay. Used only when salary_min_eur or

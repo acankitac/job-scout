@@ -8,14 +8,16 @@ from datetime import date
 from pathlib import Path
 
 from .aggregators import fetch_generic
+from .portals import fetch_portals
 from .contacts import Hunter
-from .filters import Criteria, _any, company_key, dedupe, evaluate, prefilter
+from .filters import Criteria, _any, company_key, dedupe, evaluate, prefilter, score
 from .country import DEFAULT_MIN_BY_COUNTRY, job_country, minimum_for
 from .market import MarketData
 from .report import write_csv, write_markdown
 from .experience import judge_experience
 from .llm import build_router
 from .research import ExperienceResearch, SalaryResearch
+from .models import Salary
 from .salary import (Negotiation, Profile, judge_estimate, judge_listed, listed_salary_usable,
                      sibling_estimate)
 from .sources import FETCHERS, SourceError
@@ -62,6 +64,71 @@ def load_config(path: str) -> dict:
             raise SystemExit(f"{path}: company {c.get('name')!r} has unknown ats {c.get('ats')!r}; "
                              f"use one of {', '.join(FETCHERS)}")
     return cfg
+
+
+# Parallel description downloads per site. Portals throttle themselves (one request at a time),
+# so each site gets its own lane and a slow site never holds up the others.
+_DETAIL_WORKERS = {"arbeitsagentur": 4}
+
+
+_DESC_CACHE = ROOT / ".cache" / "descriptions"
+_DESC_TTL = 21 * 86400
+
+
+def _desc_path(j):
+    import re as _re
+    return _DESC_CACHE / j.source / (_re.sub(r"[^A-Za-z0-9._-]+", "_", j.job_id)[:120] + ".json")
+
+
+def _from_cache(j) -> bool:
+    import time as _t
+    p = _desc_path(j)
+    if not p.exists() or _t.time() - p.stat().st_mtime > _DESC_TTL:
+        return False
+    d = json.loads(p.read_text())
+    j.description = d.get("description", "")
+    if not j.salary and d.get("salary"):
+        j.salary = Salary(**d["salary"])
+    return True
+
+
+def _to_cache(j):
+    p = _desc_path(j)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    sal_ = j.salary
+    p.write_text(json.dumps({"description": j.description, "salary": sal_ and {
+        "min": sal_.min, "max": sal_.max, "currency": sal_.currency, "interval": sal_.interval,
+        "origin": sal_.origin}}))
+
+
+def _load_details(need, crit, cap_per_source):
+    """Fetch full descriptions, most promising titles first, capped per source. Descriptions are
+    cached, so later runs only download postings they haven't seen."""
+    need = [j for j in need if not _from_cache(j)]
+    groups = {}
+    for j in sorted(need, key=lambda j: -score(j, crit)[0]):
+        groups.setdefault(j.source, []).append(j)
+    errors, blocked = [0], set()
+
+    def run(source, jobs):
+        if len(jobs) > cap_per_source:
+            print(f"  ! {source}: {len(jobs) - cap_per_source} postings not opened, "
+                  f"max_detail_fetches ({cap_per_source}) reached", file=sys.stderr)
+        with ThreadPoolExecutor(max_workers=_DETAIL_WORKERS.get(source, 1)) as pool:
+            futs = {pool.submit(j.loader): j for j in jobs[:cap_per_source]}
+            for fut, j in futs.items():
+                try:
+                    fut.result()
+                    if j.description:
+                        _to_cache(j)
+                except SourceError as e:
+                    errors[0] += 1
+                    if "stopped for this run" in str(e):
+                        blocked.add(str(e))
+
+    with ThreadPoolExecutor(max_workers=max(1, len(groups))) as lanes:
+        list(lanes.map(lambda kv: run(*kv), groups.items()))
+    return errors[0], sorted(blocked)
 
 
 def _prefetch(res, jobs, fn, domains, workers):
@@ -135,6 +202,9 @@ def main(argv=None):
         gcfg["where"] = args.where
     with ThreadPoolExecutor(max_workers=8) as pool:
         market = pool.submit(fetch_generic, gcfg) if use_market else None
+        pcfg = cfg.get("portals", {})
+        portals = (pool.submit(fetch_portals, pcfg, gcfg.get("queries") or ["backend engineer"])
+                   if use_market and pcfg.get("enabled") else None)
         futures = {pool.submit(FETCHERS[c["ats"]], c["name"], c["token"]): c for c in companies}
         for fut in as_completed(futures):
             c = futures[fut]
@@ -142,10 +212,11 @@ def main(argv=None):
                 all_jobs.extend(fut.result())
             except SourceError as e:
                 failures.append((c["name"], str(e)))
-        if market:
-            jobs, fails = market.result()
-            all_jobs.extend(jobs)
-            failures.extend(fails)
+        for fut in (market, portals):
+            if fut:
+                jobs, fails = fut.result()
+                all_jobs.extend(jobs)
+                failures.extend(fails)
     if args.only and use_market:
         wanted = {o.lower() for o in args.only}
         all_jobs = [j for j in all_jobs if j.company.lower() in wanted or any(w in j.company.lower() for w in wanted)]
@@ -157,16 +228,9 @@ def main(argv=None):
 
     # ---- fetch full descriptions where search results didn't include them ----
     need = [j for j in all_jobs if j.loader and prefilter(j, crit) is None]
-    cap = gcfg.get("max_detail_fetches", 200)
-    if len(need) > cap:
-        print(f"  ! {len(need) - cap} postings not opened, max_detail_fetches ({cap}) reached", file=sys.stderr)
-    detail_errors = 0
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        for fut in [pool.submit(j.loader) for j in need[:cap]]:
-            try:
-                fut.result()
-            except SourceError:
-                detail_errors += 1
+    detail_errors, blocked = _load_details(need, crit, gcfg.get("max_detail_fetches", 200))
+    for msg in blocked:
+        print(f"  ! {msg}; remaining postings from it are judged on title only", file=sys.stderr)
     if detail_errors:
         print(f"  ! {detail_errors} job descriptions couldn't be fetched; judged on title only", file=sys.stderr)
 

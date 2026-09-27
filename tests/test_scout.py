@@ -1,5 +1,6 @@
 import io
 import json
+import urllib.error
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -543,6 +544,74 @@ class ResearchCaps(unittest.TestCase):
         self.assertTrue(router.exhausted)
         self.assertEqual((res.lookups, res.skipped, res.errors), (1, 1, []))
         self.assertEqual(len(anth.calls), 1)
+
+
+class Portals(unittest.TestCase):
+    LI_SEARCH = """<li><div class="base-card" data-entity-urn="urn:li:jobPosting:123">
+      <a class="base-card__full-link absolute" href="https://de.linkedin.com/jobs/view/backend-at-acme-123?position=1">
+      <span class="sr-only"> Backend Engineer </span></a>
+      <h3 class="base-search-card__title"> Senior Backend Engineer </h3>
+      <h4 class="base-search-card__subtitle"> <a href="x"> Acme </a> </h4>
+      <span class="job-search-card__location"> Zurich, Zurich, Switzerland </span>
+      <time class="job-search-card__listdate" datetime="2026-09-24"> 1 day ago </time></div></li>"""
+    LI_DETAIL = """<div class="show-more-less-html__markup relative"> <p>5+ years of experience with Java.</p> </div>
+      <h3 class="description__job-criteria-subheader job-criteria__subheader">Seniority level</h3>
+      <span class="description__job-criteria-text">Mid-Senior level</span>"""
+    JCH = ("<script>window.__INIT__ = " + json.dumps({"vacancy": {"results": {"main": {"results": [{
+        "id": "abc-1", "title": "Backend Engineer", "company": {"name": "Acme AG"}, "isActive": True,
+        "place": "Switzerland", "publicationDate": "2026-09-15T17:25:34+02:00",
+        "locations": [{"city": "Switzerland", "postalCode": "Zürich", "countryCode": "CH"}]}]}}}})
+        + ";</script>")
+    JCH_DETAIL = '<div data-cy="vacancy-description"><p>Kotlin and Kafka. CHF 130,000 - 150,000</p></div>\n</div>'
+    RSS = """<?xml version="1.0"?><rss><channel><item><title>Backend Engineer, Acme ApS</title>
+      <link>https://www.jobindex.dk/vis-job/h1</link><guid>https://www.jobindex.dk/1</guid>
+      <pubDate>Wed, 2 Sep 2026 00:00:00 +0200</pubDate>
+      <description>&lt;span class="jix_robotjob--area"&gt;Copenhagen&lt;/span&gt; Go and Kafka.</description>
+      </item></channel></rss>"""
+
+    def _site(self, pages):
+        from job_scout.portals import Site
+        site = Site("test", 0)
+        site.get = lambda url: next(v for k, v in pages.items() if k in url)
+        return site
+
+    def test_linkedin_search_and_detail(self):
+        from job_scout import portals
+        site = self._site({"seeMoreJobPostings": self.LI_SEARCH, "jobPosting/123": self.LI_DETAIL})
+        jobs = portals.linkedin(["backend"], ["Zurich, Switzerland"], pages=1, site=site)
+        j = jobs[0]
+        self.assertEqual((j.company, j.title, j.job_id), ("Acme", "Senior Backend Engineer", "123"))
+        self.assertEqual(j.url, "https://de.linkedin.com/jobs/view/backend-at-acme-123")
+        self.assertEqual(j.published.tzinfo is not None, True)
+        j.loader()
+        self.assertIn("5+ years", j.description)
+        self.assertIn("Seniority level: Mid-Senior level", j.description)
+
+    def test_jobs_ch_listing_and_detail(self):
+        from job_scout import portals
+        site = self._site({"vacancies/?": self.JCH, "vacancies/detail/abc-1": self.JCH_DETAIL})
+        j = portals.jobs_ch(["backend"], ["Zürich"], pages=1, site=site)[0]
+        self.assertEqual((j.company, j.location), ("Acme AG", "Zürich, Switzerland"))
+        j.loader()
+        self.assertEqual((j.salary.min, j.salary.currency), (130000, "CHF"))
+
+    def test_jobindex_rss(self):
+        from job_scout import portals
+        j = portals.jobindex(["backend"], pages=1, site=self._site({"jobsoegning.rss": self.RSS}))[0]
+        self.assertEqual((j.title, j.company, j.location), ("Backend Engineer", "Acme ApS", "Copenhagen, Denmark"))
+        self.assertIn("Kafka", j.description)
+
+    def test_site_stops_after_throttling(self):
+        from job_scout.portals import Site, Throttled
+        site = Site("x", 0)
+        err = urllib.error.HTTPError("u", 429, "slow down", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(Throttled):
+                site.get("https://x/1")
+        with mock.patch("urllib.request.urlopen") as m:  # no further requests once blocked
+            with self.assertRaises(Throttled):
+                site.get("https://x/2")
+            m.assert_not_called()
 
 
 class HunterLookup(unittest.TestCase):

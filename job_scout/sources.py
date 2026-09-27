@@ -50,7 +50,9 @@ def _dt(value) -> Optional[datetime]:
     try:
         if isinstance(value, (int, float)):  # Lever: epoch milliseconds
             return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # Date-only values ("2026-09-24") parse as naive; make every date comparable.
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except (ValueError, OSError):
         return None
 
