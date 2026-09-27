@@ -447,21 +447,80 @@ class MarketCheck(unittest.TestCase):
 
     def test_unverified_status(self):
         from job_scout.cli import _unverified_status
-        c = Criteria(salary_min_eur=120000)
+        c, neg, prof = Criteria(), sal.Negotiation(), sal.Profile()
         with tempfile.TemporaryDirectory() as d:
             m = self._market(d)
-            startup = job(company="Tiny GmbH", location="Berlin, Germany")
-            self.assertEqual(_unverified_status(startup, c, sal.Negotiation(), sal.Profile(), m, set(), 75),
-                             "market unlikely")
+            startup = job(company="Tiny GmbH", location="Berlin, Germany", country="Germany", min_eur=120000)
+            self.assertEqual(_unverified_status(startup, c, neg, prof, m, set(), 75), "market unlikely")
             self.assertAlmostEqual(startup.market_share_above_min, 13, delta=1.5)
-            big = job(company="Bigco SE", location="Berlin, Germany")
-            self.assertEqual(_unverified_status(big, c, sal.Negotiation(), sal.Profile(), m, {"bigco"}, 75),
-                             "high payer")
-            low = Criteria(salary_min_eur=80000)
-            self.assertEqual(_unverified_status(job(location="Berlin"), low, sal.Negotiation(), sal.Profile(), m, set(), 75),
-                             "market plausible")
-            abroad = job(location="Zurich, Switzerland")
-            self.assertEqual(_unverified_status(abroad, c, sal.Negotiation(), sal.Profile(), m, set(), 75), "unverified")
+            big = job(company="Bigco SE", location="Berlin, Germany", country="Germany", min_eur=120000)
+            self.assertEqual(_unverified_status(big, c, neg, prof, m, {"bigco"}, 75), "high payer")
+            low = job(location="Berlin", country="Germany", min_eur=80000)
+            self.assertEqual(_unverified_status(low, c, neg, prof, m, set(), 75), "market plausible")
+            nowhere = job(location="Tokyo", country="Japan", min_eur=120000)
+            self.assertEqual(_unverified_status(nowhere, c, neg, prof, m, set(), 75), "unverified")
+
+    def test_other_countries_scaled_by_eurostat(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = self._market(d)
+            m._ses = {"DE": 70000, "CH": 112000, "PL": 21000}
+            de = m.stat(job(title="Senior Engineer", location="Germany", country="Germany"), sal.Profile())
+            ch = m.stat(job(title="Senior Engineer", location="Zurich", country="Switzerland"), sal.Profile())
+            pl = m.stat(job(title="Senior Engineer", location="Warsaw", country="Poland"), sal.Profile())
+            self.assertIsNone(m.stat(job(location="London", country="United Kingdom"), sal.Profile()))
+        self.assertAlmostEqual(ch.median / de.median, 1.6)
+        self.assertAlmostEqual(pl.median / de.median, 0.3)
+        self.assertTrue(ch.approx and not de.approx)
+        # Scaling keeps the shape: the same minimum-to-median ratio sits at the same percentile.
+        self.assertAlmostEqual(ch.percentile(ch.median * 1.2), de.percentile(de.median * 1.2))
+
+
+class Countries(unittest.TestCase):
+    def test_detection(self):
+        from job_scout.country import countries_in, job_country
+        self.assertEqual(countries_in("Zürich, Switzerland"), ["Switzerland"])
+        self.assertEqual(countries_in("Amsterdam; Dublin"), ["Netherlands", "Ireland"])
+        self.assertEqual(job_country("Amsterdam; Dublin", "Germany"), "Netherlands")
+        self.assertEqual(job_country("Germany; Portugal; France", "Germany"), "Germany")  # home listed
+        self.assertEqual(job_country("Remote - Europe", "Germany"), "Germany")          # no country
+        self.assertEqual(job_country("Warszawa", "Germany"), "Poland")
+        self.assertEqual(countries_in("Leuven"), [])  # no false "EU"/"UK" hits
+
+    def test_minimums(self):
+        from job_scout.country import minimum_for
+        self.assertEqual(minimum_for("Switzerland", {}, 90000), 160000)            # built-in default
+        self.assertEqual(minimum_for("Switzerland", {"Switzerland": 150000}, 0), 150000)  # config wins
+        self.assertEqual(minimum_for("Austria", {}, 90000), 90000)                 # neither: fallback
+        self.assertEqual(minimum_for("Poland", {}, 0), 80000)
+
+    def test_currency_and_parsed_band_usability(self):
+        prof = sal.Profile(country="Germany")
+        chf = job(location="Zurich", country="Switzerland", salary=Salary(150000, 180000, "CHF", origin="parsed"))
+        usd = job(location="Zurich", country="Switzerland", salary=Salary(150000, 180000, "USD", origin="parsed"))
+        self.assertTrue(sal.listed_salary_usable(chf, prof))
+        self.assertFalse(sal.listed_salary_usable(usd, prof))
+
+    def test_sibling_estimate_uses_the_jobs_country(self):
+        prof = sal.Profile(country="Germany")
+        target = job(job_id="t", title="Senior Engineer", location="Zurich", country="Switzerland")
+        berlin = job(job_id="a", title="Senior Engineer", location="Berlin", salary=Salary(90000, 110000, "EUR"))
+        zurich = job(job_id="b", title="Senior Engineer", location="Zürich, Switzerland",
+                     salary=Salary(150000, 170000, "CHF"))
+        us_tier = job(job_id="c", title="Senior Engineer", location="Zurich; New York",
+                      salary=Salary(250000, 300000, "USD"))
+        e = sal.sibling_estimate(target, [target, berlin, zurich, us_tier], prof,
+                                 {"EUR": 1.0, "CHF": 1.0, "USD": 1.0}, lambda t: True)
+        self.assertEqual((e.low, e.high), (150000, 170000))
+
+    def test_research_asks_about_the_jobs_country(self):
+        router = llm.Router([FakeBackend("anthropic", OK)])
+        with tempfile.TemporaryDirectory() as d:
+            r = research.SalaryResearch({}, sal.Profile(city="Berlin", country="Germany"), {"EUR": 1.0},
+                                        Path(d), router=router)
+            r.estimate(job(location="Copenhagen", country="Denmark"))
+            prompt = router.backends[0].calls[0]["messages"][0]["content"]
+        self.assertIn("Estimate for employment in Denmark, paid in DKK", prompt)
+        self.assertIn("based in Berlin, Germany", prompt)
 
 
 class ResearchCaps(unittest.TestCase):

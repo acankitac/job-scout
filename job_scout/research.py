@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Job
+from .country import currency_of, job_country
 from .experience import YoeEstimate, title_stem
 from .llm import CallFailed, Router, build_router
 from .salary import Estimate, Profile, infer_level
@@ -206,18 +207,22 @@ class SalaryResearch(WebResearch):
         super().__init__(cfg, profile, cache_dir, api_key, router)
         self.fx = fx
 
+    def _country(self, job: Job) -> str:
+        return job.country or job_country(job.location, self.profile.country)
+
     def key(self, job: Job) -> tuple:
-        return (job.company, infer_level(job.title))
+        return (job.company, infer_level(job.title), self._country(job))
 
     def estimate(self, job: Job, domain: str = "") -> Optional[Estimate]:
         level = infer_level(job.title)
         p = self.profile
+        country = self._country(job)
         prompt = PROMPT.format(
             company=job.company, title=job.title, location=job.location[:300], level=level,
             years=p.years_experience, where=", ".join(filter(None, [p.city, p.country])),
-            country=p.country, currency=p.currency, excerpt=job.description[:1500])
-        data = self._lookup(self._cache_path(job.company, level, p.country), prompt, domain,
-                            f"{job.company} ({level})")
+            country=country, currency=currency_of(country), excerpt=job.description[:1500])
+        data = self._lookup(self._cache_path(job.company, level, country), prompt, domain,
+                            f"{job.company} ({level}, {country})")
         return self._to_estimate(data, level) if data else None
 
     def _to_estimate(self, data: dict, level: str) -> Optional[Estimate]:

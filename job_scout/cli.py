@@ -10,6 +10,7 @@ from pathlib import Path
 from .aggregators import fetch_generic
 from .contacts import Hunter
 from .filters import Criteria, _any, company_key, dedupe, evaluate, prefilter
+from .country import DEFAULT_MIN_BY_COUNTRY, job_country, minimum_for
 from .market import MarketData
 from .report import write_csv, write_markdown
 from .experience import judge_experience
@@ -89,12 +90,12 @@ def _unverified_status(j, crit, neg, profile, market, high_payers, threshold):
     if company_key(j.company) in high_payers:
         return "high payer"
     stat = market.stat(j, profile) if market else None
-    if stat is None or not crit.salary_min_eur:
+    if stat is None or not j.min_eur:
         return "unverified"
     j.market = stat
-    j.market_share_above_min = 100 - stat.percentile(crit.salary_min_eur)
+    j.market_share_above_min = 100 - stat.percentile(j.min_eur)
     # A typical offer this far up the market, plus negotiation, would reach your minimum.
-    needed = crit.salary_min_eur / (1 + neg.default_headroom_pct / 100)
+    needed = j.min_eur / (1 + neg.default_headroom_pct / 100)
     return "market unlikely" if stat.percentile(needed) > threshold else "market plausible"
 
 
@@ -104,8 +105,9 @@ def main(argv=None):
     crit = Criteria.from_dict(cfg.get("criteria", {}))
     if args.location:
         crit.locations = args.location
-    if args.min_salary is not None:
+    if args.min_salary is not None:  # one minimum for every country, this run only
         crit.salary_min_eur = args.min_salary
+        crit.salary_min_by_country, crit.use_default_minimums = {}, False
     if args.max_salary is not None:
         crit.salary_max_eur = args.max_salary
     if args.require_salary:
@@ -197,6 +199,12 @@ def main(argv=None):
     domains = {c["name"]: c.get("domain", "") for c in cfg["companies"]}
     # Best matches first, so research spends any per-run cap on the roles most worth it.
     matches.sort(key=lambda j: (-j.score, j.company, j.title))
+    by_country = dict(DEFAULT_MIN_BY_COUNTRY) if crit.use_default_minimums else {}
+    by_country.update(crit.salary_min_by_country or {})
+    crit.effective_minimums = by_country
+    for j in matches:
+        j.country = job_country(j.location, profile.country)
+        j.min_eur = minimum_for(j.country, by_country, crit.salary_min_eur)
 
     # ---- experience: from the JD, else researched for the role's level ----
     rcfg = cfg.get("research", {})
@@ -231,7 +239,7 @@ def main(argv=None):
     # ---- salary: listed, estimated, high payer, market check ----
     neg = Negotiation.from_dict(cfg.get("negotiation", {}))
     scfg = cfg.get("salary_check", {})
-    bounded = bool(crit.salary_min_eur or crit.salary_max_eur)
+    bounded = bool(crit.salary_max_eur or any(j.min_eur for j in matches))
     research = SalaryResearch(rcfg, profile, crit.fx_to_eur, ROOT / ".cache" / "salary", router=router)
     if args.no_research or not (bounded or args.research):
         research.disabled = True  # cached results are still used; no new paid lookups
@@ -251,14 +259,14 @@ def main(argv=None):
     for j in matches:
         why = None
         if listed_salary_usable(j, profile):
-            why = judge_listed(j, crit.salary_min_eur, crit.salary_max_eur, crit.fx_to_eur, neg)
+            why = judge_listed(j, j.min_eur, crit.salary_max_eur, crit.fx_to_eur, neg)
             j.salary_status = "listed"
         elif crit.require_salary:
             why = "salary: not listed"
         else:
             j.estimate = j.estimate or research.estimate(j, domains.get(j.company, ""))
             if j.estimate:
-                why = judge_estimate(j, j.estimate, crit.salary_min_eur, crit.salary_max_eur, neg)
+                why = judge_estimate(j, j.estimate, j.min_eur, crit.salary_max_eur, neg)
                 j.salary_status = "estimated"
             elif bounded:
                 j.salary_status = _unverified_status(j, crit, neg, profile, market, high_payers, threshold)

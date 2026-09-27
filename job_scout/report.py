@@ -37,7 +37,7 @@ def _salary_cell(job, fx):
 def write_csv(path: Path, jobs, fx, neg):
     with path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["new", "score", "company", "title", "location", "salary_status", "salary", "salary_max_eur_year",
+        w.writerow(["new", "score", "company", "title", "location", "country", "min_eur", "salary_status", "salary", "salary_max_eur_year",
                     "est_low_eur", "est_typical_eur", "est_high_eur", "est_reach_with_negotiation_eur",
                     "est_basis", "est_confidence", "negotiate_to_meet_minimum",
                     "years_min", "years_max", "years_basis", "posted", "matched_keywords", "url"])
@@ -45,7 +45,7 @@ def write_csv(path: Path, jobs, fx, neg):
             _, hi = j.salary.to_eur_year(fx) if j.salary else (None, None)
             e = j.estimate
             w.writerow(["NEW" if j.is_new else "", j.score, j.company, j.title, j.location,
-                        j.salary_status, j.salary.display() if j.salary else "", f"{hi:.0f}" if hi else "",
+                        j.country, f"{j.min_eur:.0f}" if j.min_eur else "", j.salary_status, j.salary.display() if j.salary else "", f"{hi:.0f}" if hi else "",
                         f"{e.low:.0f}" if e else "", f"{e.typical:.0f}" if e else "",
                         f"{e.high:.0f}" if e and e.high else "", f"{j.reach:.0f}" if e and j.reach else "",
                         e.basis if e else "", e.confidence if e else "", "yes" if j.negotiate else "",
@@ -110,21 +110,22 @@ def _unverified_section(side, crit):
     if not side:
         return []
     out = ["## Salary not verified", "",
-           f"These fit everything else, but nothing shows they pay your €{crit.salary_min_eur:,.0f} minimum: "
+           "These fit everything else, but nothing shows they pay your minimum for their country: "
            "no salary listed, no estimate, and the employer isn't in your `high_payers` list. "
-           "\"Market\" is official pay data (Bundesagentur Entgeltatlas) for that kind of role in that "
-           "region: 25th percentile / median / 75th percentile per year.", "",
+           "\"Market\" is official pay data for that kind of role and region: 25th percentile / median / "
+           "75th percentile per year. Germany: Bundesagentur Entgeltatlas. Elsewhere (≈): German data "
+           "scaled by Eurostat's pay ratio for professionals, an approximation.", "",
            "| Score | Company | Role | Location | Yrs | Why | Market |", "|---|---|---|---|---|---|---|"]
     for j in side:
         loc = j.location if len(j.location) <= 45 else j.location[:42] + "..."
         if j.salary_status == "market unlikely":
             why = (f"only ~{j.market_share_above_min:.0f}% of the {j.market.region} market "
-                   f"({j.market.level}) pays this")
+                   f"({j.market.level}) pays your {_k(j.min_eur)}{' (≈)' if j.market.approx else ''}")
         else:
-            why = "no pay data (outside Germany or unmapped)" if not j.market else "no pay data"
+            why = f"no pay data for {j.country or 'this location'}"
         out.append(f"| {j.score} | {j.company} | [{j.title.replace('|', '/')}]({j.url}) | "
                    f"{loc.replace('|', '/')} | {j.yoe.display() if j.yoe else '?'} | {why} | "
-                   f"{j.market.display() if j.market else ''} |")
+                   f"{('≈ ' if j.market and j.market.approx else '') + j.market.display() if j.market else ''} |")
     return out + [""]
 
 
@@ -138,8 +139,15 @@ def write_markdown(path: Path, jobs, side, cfg, crit, neg, contacts, failures, s
     crit_bits = [f"locations: {', '.join(crit.locations) or 'any'}"]
     if crit.allow_remote:
         crit_bits.append(f"remote in: {', '.join(crit.remote_regions) or 'anywhere'}")
-    if crit.salary_min_eur or crit.salary_max_eur:
-        crit_bits.append(f"salary €{crit.salary_min_eur:,.0f}–{crit.salary_max_eur or '∞'}")
+    mins = crit.effective_minimums or {}
+    if mins:
+        per = ", ".join(f"{c} {_k(v)}" for c, v in mins.items())
+        other = f"; elsewhere {_k(crit.salary_min_eur)}" if crit.salary_min_eur else ""
+        crit_bits.append(f"salary minimum: {per}{other}")
+    elif crit.salary_min_eur:
+        crit_bits.append(f"salary minimum {_k(crit.salary_min_eur)}")
+    if crit.salary_max_eur:
+        crit_bits.append(f"salary maximum {_k(crit.salary_max_eur)}")
     if crit.max_age_days:
         crit_bits.append(f"posted within {crit.max_age_days} days")
     if crit.max_years_required or crit.min_years_expected:

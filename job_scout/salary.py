@@ -12,6 +12,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .country import currency_of, job_country
 from .models import Job
 
 # Base-salary uplift typically achievable by negotiating, by how negotiable the company is.
@@ -89,13 +90,16 @@ def reachable(typical: float, high: Optional[float], headroom_pct: float) -> flo
 
 
 def sibling_estimate(job: Job, all_jobs: list, profile: Profile, fx: dict, is_role) -> Optional[Estimate]:
-    """Estimate from the same company's salaried postings at the same level in the same country."""
+    """Estimate from the same company's salaried postings at the same level in the job's country."""
     level = infer_level(job.title)
+    country = job.country or job_country(job.location, profile.country)
     lows, highs, srcs = [], [], []
     for s in all_jobs:
-        if (s is job or s.company != job.company or not s.salary
-                or s.salary.currency != profile.currency or infer_level(s.title) != level
-                or not is_role(s.title) or not profile.in_country(s.location)):
+        if (s is job or s.company != job.company or not s.salary or infer_level(s.title) != level
+                or not is_role(s.title) or job_country(s.location, profile.country) != country
+                # Only bands in the country's own currency: a USD band on a posting that also
+                # lists Germany is the US tier, not the German one.
+                or s.salary.currency != currency_of(country)):
             continue
         lo, hi = s.salary.to_eur_year(fx)
         if lo is None or hi is None:
@@ -114,12 +118,13 @@ def sibling_estimate(job: Job, all_jobs: list, profile: Profile, fx: dict, is_ro
 
 
 def listed_salary_usable(job: Job, profile: Profile) -> bool:
-    """Parsed foreign-currency figures on a posting in your country are usually another
-    region's pay band quoted elsewhere in the text; treat those as 'not listed'."""
+    """A figure parsed from the text in a currency other than the job country's is usually
+    another region's pay band quoted elsewhere in the posting; treat it as 'not listed'."""
     s = job.salary
     if not s:
         return False
-    return not (s.origin == "parsed" and s.currency != profile.currency and profile.in_country(job.location))
+    country = job.country or job_country(job.location, profile.country)
+    return not (s.origin == "parsed" and s.currency != currency_of(country))
 
 
 def judge_listed(job: Job, min_eur: float, max_eur: float, fx: dict, neg: Negotiation) -> Optional[str]:

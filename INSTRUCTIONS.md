@@ -106,11 +106,39 @@ reason, so you can tell whether a filter is too tight.
 Most European postings don't list pay. When you set a salary bound, job-scout doesn't drop
 those roles. It estimates them and judges every role by **what you could reach by negotiating**.
 
+**A minimum per country.** €120k is an ordinary senior salary in Zurich and an exceptional one in
+Warsaw, so the minimum depends on the country the job would employ you in:
+
+```toml
+[criteria]
+salary_min_eur = 120000          # countries without their own minimum
+use_default_minimums = true      # fill gaps from the built-in defaults
+
+[criteria.salary_min_by_country]  # annual base, EUR
+Germany = 115000
+Switzerland = 160000
+Denmark = 110000
+Netherlands = 115000
+Ireland = 115000
+Poland = 80000
+```
+
+A country missing from `salary_min_by_country` uses the built-in default above, if there is one,
+then `salary_min_eur`. `use_default_minimums = false` uses only what you list. `--min-salary N` on
+the command line applies one minimum to every country for that run.
+
+The job's country comes from its location: country names in English or the local language, and
+major cities ("Zürich", "Warszawa", "Aarhus"). A posting open in several countries is judged for
+your home country (`[profile] country`) if it's one of them, otherwise the first listed. Remote
+postings that name no country ("Remote - Europe") are judged for your home country. Research and
+company-band estimates use that country and its currency, so a Zurich role is compared with
+Zurich pay in CHF, not Berlin pay.
+
 **How the bounds work**
 
 | You set | Effect |
 |---|---|
-| only `salary_min_eur` (max = 0) | No upper limit. A role passes if its reachable pay meets your minimum. |
+| a minimum (max = 0) | No upper limit. A role passes if its reachable pay meets your minimum for its country. |
 | only `salary_max_eur` (min = 0) | Drops roles whose pay *floor* is above it. Rarely useful. |
 | both | Both rules apply. |
 | neither | No salary filtering, and no paid research (company-posting estimates are still shown). |
@@ -125,11 +153,16 @@ those roles. It estimates them and judges every role by **what you could reach b
    own site) for the company's base-salary range at the role's level in your country, and how
    negotiable it is. Best-scoring roles are researched first.
 4. **In your `high_payers` list:** kept in the main list as "high payer", even without data.
-5. **Market check.** Official German pay statistics (Bundesagentur Entgeltatlas) for that kind of
-   role and region show how much of the market pays your minimum. If a typical offer would have
+5. **Market check.** Official pay statistics for that kind of role and region show how much of
+   the market pays your minimum. Germany: Bundesagentur Entgeltatlas, by skill level and federal
+   state. Other European countries: an approximation, marked ≈. Eurostat only publishes pay for
+   "professionals" as a whole, so the German software-developer figures are scaled by each
+   country's ratio to Germany (Switzerland about 1.6×, Poland about 0.3×). It understates tech pay
+   where tech earns unusually more than other professions, notably Poland, so treat ≈ figures as
+   rough and prefer research there. If a typical offer would have
    to sit above the `unlikely_above_percentile` (default 75th) to reach it with negotiation, the
    role is "unlikely"; otherwise "plausible" and it stays in the main list.
-6. **No data at all** (e.g. outside Germany): "unverified".
+6. **No data at all** (countries outside Eurostat, e.g. the UK or US): "unverified".
 
 "Unlikely" and "unverified" roles go to a separate **Salary not verified** section of the report,
 with the reason and the market figures, so the main list only holds roles whose pay is known or

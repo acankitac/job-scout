@@ -20,6 +20,9 @@ class Criteria:
     title_exclude: list = field(default_factory=list)
     salary_min_eur: float = 0
     salary_max_eur: float = 0
+    salary_min_by_country: dict = None   # EUR per country; None = built-in defaults
+    use_default_minimums: bool = True
+    effective_minimums: dict = None      # filled in at run time: defaults + config
     require_salary: bool = False
     max_age_days: int = 0
     max_years_required: int = 0

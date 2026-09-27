@@ -1,4 +1,13 @@
-"""Market pay baseline from official German statistics (Bundesagentur für Arbeit, Entgeltatlas).
+"""Market pay baseline from official statistics.
+
+Germany: Bundesagentur für Arbeit Entgeltatlas, detailed by occupation, skill level and region.
+Other European countries: an approximation. Eurostat's Structure of Earnings Survey gives each
+country's mean pay for "professionals" (ISCO major group 2) only, not software developers, so the
+German national software-developer distribution is scaled by that country's ratio to Germany.
+That captures the big differences (Switzerland ~1.6x, Poland ~0.3x) but not how tech pay compares
+to other professions locally; it understates tech pay where the gap is unusually wide (Poland).
+These results are marked approximate.
+
 
 For an employer with no salary data of its own, this answers: how much of the market pays at
 least your minimum, for this kind of role and region? It can't say what one company pays, only
@@ -24,6 +33,14 @@ from .salary import infer_level
 from .sources import UA
 
 API = "https://rest.arbeitsagentur.de/infosysbub/entgeltatlas/pc/v1/entgelte"
+EUROSTAT = ("https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/earn_ses22_28"
+            "?format=JSON&lang=EN&sex=T&age=TOTAL&sizeclas=GE10&unit=EUR&indic_se=ERN&isco08=OC2")
+GEO = {"Switzerland": "CH", "Denmark": "DK", "Netherlands": "NL", "Ireland": "IE", "Poland": "PL",
+       "Austria": "AT", "France": "FR", "Spain": "ES", "Portugal": "PT", "Italy": "IT", "Sweden": "SE",
+       "Norway": "NO", "Finland": "FI", "Belgium": "BE", "Luxembourg": "LU", "Czechia": "CZ",
+       "Estonia": "EE", "Hungary": "HU"}
+# Mean annual pay of professionals, EUR, SES 2022, used if Eurostat can't be reached.
+FALLBACK_SES = {"DE": 73798, "CH": 120651, "DK": 76864, "NL": 67760, "IE": 70522, "PL": 20939}
 HEADERS = {"X-API-Key": "infosysbub-ega", "User-Agent": UA, "Accept": "application/json"}
 
 # KldB 4341x: software development. Skill level: 2 Fachkraft, 3 Spezialist, 4 Experte.
@@ -60,6 +77,7 @@ class MarketStat:
     q25: float
     q75: Optional[float]    # None when withheld above the reporting ceiling
     ceiling: float          # EUR per year above which figures are withheld
+    approx: bool = False    # scaled from Germany by Eurostat ratios, not measured locally
 
     @property
     def sigma(self) -> float:
@@ -91,6 +109,7 @@ class MarketStat:
 
 
 def region_for(job: Job, profile) -> Optional[str]:
+    """German federal state for a job in Germany (None if the location names none)."""
     loc = (job.location or "").lower()
     # A posting open in several cities: use yours, since that's where you'd be paid.
     home = (profile.city or "").lower()
@@ -107,11 +126,51 @@ def region_for(job: Job, profile) -> Optional[str]:
     return None  # outside Germany: no official data
 
 
+def _get_json_tls(url: str):
+    """Some Python installs lack the CA chain Eurostat's certificate needs; retry with certifi's
+    bundle when it's installed. Verification is never switched off."""
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.URLError as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+        try:
+            import certifi
+        except ImportError:
+            raise e from None
+        import ssl
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+            return json.load(r)
+
+
 class MarketData:
     def __init__(self, cache_dir: Path, ttl_days: int = 30):
         self.cache_dir = cache_dir
         self.ttl = ttl_days * 86400
         self.errors = []
+        self._ses = None
+
+    def _ses_means(self) -> dict:
+        """Mean pay of professionals per country code, from Eurostat (cached 90 days)."""
+        if self._ses is not None:
+            return self._ses
+        path = self.cache_dir / "eurostat-ses22-oc2.json"
+        try:
+            if path.exists() and time.time() - path.stat().st_mtime < 90 * 86400:
+                self._ses = json.loads(path.read_text())
+                return self._ses
+            d = _get_json_tls(EUROSTAT)
+            geo = d["dimension"]["geo"]["category"]["index"]  # code -> position; other dims are fixed
+            self._ses = {code: d["value"][str(pos)] for code, pos in geo.items() if str(pos) in d["value"]}
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._ses))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as e:
+            self.errors.append(f"eurostat unavailable, using built-in 2022 figures: {e}")
+            self._ses = dict(FALLBACK_SES)
+        return self._ses
 
     def _fetch(self, kldb: str, region_id: int) -> list:
         path = self.cache_dir / f"{kldb}-{region_id}.json"
@@ -125,9 +184,21 @@ class MarketData:
         return rows
 
     def stat(self, job: Job, profile) -> Optional[MarketStat]:
-        region = region_for(job, profile)
-        if region is None:
+        country = job.country or profile.country
+        if country == "Germany":
+            return self._german(job, profile, region_for(job, profile) or "Deutschland")
+        code = GEO.get(country)
+        if not code:
             return None
+        base = self._german(job, profile, "Deutschland")
+        ses = self._ses_means()
+        if base is None or not ses.get(code) or not ses.get("DE"):
+            return None
+        k = ses[code] / ses["DE"]
+        return MarketStat(region=country, level=base.level, median=base.median * k, q25=base.q25 * k,
+                          q75=base.q75 * k if base.q75 else None, ceiling=base.ceiling * k, approx=True)
+
+    def _german(self, job: Job, profile, region: str) -> Optional[MarketStat]:
         kldb, level = LEVEL_TO_KLDB.get(infer_level(job.title), LEVEL_TO_KLDB["mid"])
         try:
             rows = self._fetch(kldb, REGIONS[region])

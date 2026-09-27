@@ -33,14 +33,16 @@ title_exclude = [
   "qa\\b", "test automation", "sre\\b", "site reliability",
 ]
 
-# Annual base salary in EUR. 0 disables that bound, so with only salary_min_eur set there is
-# no upper limit. salary_max_eur drops roles whose pay *floor* is above it (rarely useful).
+# Annual base salary in EUR. salary_min_eur is the minimum for countries without their own
+# (see salary_min_by_country below); 0 there means no minimum. 0 for salary_max_eur means no
+# upper limit. salary_max_eur drops roles whose pay *floor* is above it (rarely useful).
 # Roles that don't list pay are estimated (see [profile], [negotiation], [research] below)
 # and judged by what's reachable with negotiation; with no estimate they are kept.
 # require_salary = true drops every role that doesn't list pay instead.
 salary_min_eur = 0
 salary_max_eur = 0
 require_salary = false
+use_default_minimums = true   # see salary_min_by_country below
 
 # Drop postings older than this many days (0 = no limit). Everything on these boards is still
 # open, and many good roles stay listed for months, so this is off by default. Use the 🆕
@@ -84,6 +86,18 @@ min_score = 4
 "data pipeline" = 1
 "senior" = 1
 
+# Salary minimum per country, annual base in EUR. Countries not listed here use the built-in
+# defaults (Germany 115k, Switzerland 160k, Denmark 110k, Netherlands 115k, Ireland 115k,
+# Poland 80k), then salary_min_eur. --min-salary on the command line overrides all of them.
+# Set use_default_minimums = false (next to salary_min_eur above) to use only what's listed here.
+[criteria.salary_min_by_country]
+Germany = 115000
+Switzerland = 160000
+Denmark = 110000
+Netherlands = 115000
+Ireland = 115000
+Poland = 80000
+
 # Rough conversion rates to EUR, used for the salary filter. Update occasionally.
 [criteria.fx_to_eur]
 EUR = 1.0
@@ -94,6 +108,8 @@ SEK = 0.091
 DKK = 0.134
 NOK = 0.086
 PLN = 0.235
+CZK = 0.040
+HUF = 0.0025
 
 # How roles that don't list pay are handled when salary_min_eur is set.
 [salary_check]
